@@ -61,6 +61,7 @@ println(add(2, 5));
 | Chuỗi | `"xin chào"` (hỗ trợ `\n`, `\t`, `\"`, `\\`) |
 | Bool | `true`, `false` |
 | List | `[1, "hai", true]` — có thể trộn kiểu |
+| Map | `map("a", 1, "b", 2)` — cặp khóa/giá trị, giữ thứ tự chèn |
 | Hàm | `func f(x) { ... }` |
 | Nil | giá trị trả về mặc định |
 
@@ -76,6 +77,17 @@ println(add(2, 5));
 | `starts_with(s, p)` / `ends_with(s, p)` | kiểm tra tiền/hậu tố | `starts_with("run: x", "run:")` → `true` |
 | `trim(s)` | bỏ khoảng trắng 2 đầu | `trim("  hi  ")` → `"hi"` |
 | `replace(s, a, b)` | thay hết `a` bằng `b` | `replace("a-b", "-", "+")` → `"a+b"` |
+| `map(k, v, ...)` | tạo map (số chẵn đối số) | `map("a", 1)` |
+| `map_set(m, k, v)` | map mới, đặt khóa `k = v` | `map_set(m, "b", 2)` |
+| `map_keys(m)` | list các khóa | `map_keys(m)` → `["a"]` |
+| `map_remove(m, k)` | map mới, bỏ khóa `k` | `map_remove(m, "a")` |
+| `get(m, k)` / `get(list, i)` | lấy giá trị theo khóa / chỉ số | `get(m, "a")` |
+| `contains(m, k)` | map có khóa `k`? | `contains(m, "a")` → `true` |
+| `read_file(p)` | đọc nội dung file | `read_file("a.txt")` |
+| `write_file(p, s)` | ghi nội dung file | `write_file("a.txt", "hi")` |
+| `chars(s)` | list các ký tự (chuỗi 1 chữ) | `chars("ab")` → `["a","b"]` |
+| `ord(c)` | mã Unicode của ký tự đầu | `ord("0")` → `48` |
+| `to_int(s)` | chuỗi → số nguyên | `to_int("42")` → `42` |
 
 ### match — pattern dispatch (cho logic agent)
 ```c
@@ -123,6 +135,20 @@ Chạy demo: `cargo run -- examples/agent_real.kinet`
 
 > `agent_run` hiện gọi bridge Python qua tiến trình (`std::process::Command`, không dùng shell nên tránh được injection). Bước nâng cấp tiếp theo là embed trực tiếp qua PyO3 (như `_kinetic_rs` của SDK) để bỏ chi phí spawn tiến trình mỗi lần gọi.
 
+## Viết phần mềm khác bằng Kinet (Mốc 4)
+
+Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:
+
+```c
+// tokenize → parse (recursive descent) → calculate
+println(eval_expr("2 + 3 * 4"));     // → 14
+println(eval_expr("(2 + 3) * 4"));   // → 20
+```
+
+Chạy: `cargo run -- examples/mini_interp.kinet`
+
+→ Nghĩa là mày có thể dùng Kinet để viết trình thông dịch/ngôn ngữ khác, công cụ, thư viện... đúng tinh thần "tạo gì cũng được, miễn có trình".
+
 ## Cấu trúc code
 
 | Module | Vai trò |
@@ -140,9 +166,10 @@ Chạy demo: `cargo run -- examples/agent_real.kinet`
 - [x] `for` loop + `break`/`continue`
 - [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
 - [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
-- [x] Unit test (41 test: lexer, parser, interpreter)
+- [x] Unit test (48 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
 - [x] **Mốc 3:** Kinet điều khiển agent Kinetic SDK thật (agent_run → bridge Python)
+- [x] **Mốc 4:** Kiểu `map`, file I/O, `chars`/`ord`/`to_int`, đệ quy sâu 2000 — đủ lập trình đa dụng; có `mini_interp.kinet` (viết trình thông dịch bằng Kinet)
 - [ ] Nâng bridge lên embed PyO3 trực tiếp (bỏ spawn tiến trình)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

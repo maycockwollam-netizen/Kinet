@@ -25,6 +25,21 @@ use parser::Parser;
 use token::TokenKind;
 
 fn main() -> ExitCode {
+    // Chạy mọi thứ trên thread stack lớn (64MB) để đệ quy sâu trong Kinet
+    // không tràn stack trước khi chạm MAX_CALL_DEPTH.
+    let spawned = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_all);
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+fn run_all() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         repl();

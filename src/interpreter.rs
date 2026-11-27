@@ -16,6 +16,8 @@ pub enum Value {
     Str(String),
     Bool(bool),
     List(Vec<Value>),
+    // Cặp (khóa, giá trị), giữ thứ tự chèn để in/lặp có thứ tự ổn định.
+    Map(Vec<(Value, Value)>),
     Func(FuncDef),
     Native(NativeFunc),
     Nil,
@@ -36,6 +38,12 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => {
+                // Với map, thứ tự không quan trọng — so theo tập (khóa, giá trị).
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(k, v)| b.iter().any(|(bk, bv)| k == bk && v == bv))
+            }
             (Value::Func(a), Value::Func(b)) => a.name == b.name,
             (Value::Native(a), Value::Native(b)) => a.name == b.name,
             (Value::Nil, Value::Nil) => true,
@@ -111,10 +119,9 @@ pub struct Interpreter {
     call_depth: usize,
 }
 
-//: Giới hạn độ sâu gọi hàm tránh stack overflow của Rust. Mỗi lần gọi hàm
-//: trong Kinet tiêu tốn ~10-16KB stack Rust (debug build), nên giữ con số
-//: này an toàn ngay cả trên thread stack nhỏ (~2MB, như test harness).
-const MAX_CALL_DEPTH: usize = 128;
+//: Giới hạn độ sâu gọi hàm tránh stack overflow. Main chạy trên thread 64MB
+//: (xem main.rs) nên con số này thoải mái cho đệ quy hợp lệ.
+const MAX_CALL_DEPTH: usize = 2000;
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -134,6 +141,15 @@ impl Interpreter {
                 ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
                 ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
                 ("agent_run", native_agent_run as fn(&[Value]) -> Result<Value, String>),
+                ("map", native_map as fn(&[Value]) -> Result<Value, String>),
+                ("map_set", native_map_set as fn(&[Value]) -> Result<Value, String>),
+                ("map_keys", native_map_keys as fn(&[Value]) -> Result<Value, String>),
+                ("map_remove", native_map_remove as fn(&[Value]) -> Result<Value, String>),
+                ("read_file", native_read_file as fn(&[Value]) -> Result<Value, String>),
+                ("write_file", native_write_file as fn(&[Value]) -> Result<Value, String>),
+                ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
+                ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
+                ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
             ] {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
@@ -505,6 +521,7 @@ impl Interpreter {
             Value::Int(n) => *n != 0,
             Value::Str(s) => !s.is_empty(),
             Value::List(items) => !items.is_empty(),
+            Value::Map(entries) => !entries.is_empty(),
             _ => true,
         }
     }
@@ -521,6 +538,14 @@ impl Interpreter {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{}]", inner)
+            }
+            Value::Map(entries) => {
+                let inner = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", self.to_string(k), self.to_string(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{}}}", inner)
             }
             Value::Func(f) => format!("<hàm {}>", f.name),
             Value::Native(n) => format!("<hàm {}>", n.name),
@@ -591,33 +616,45 @@ fn native_len(args: &[Value]) -> Result<Value, String> {
     match &args[0] {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::List(items) => Ok(Value::Int(items.len() as i64)),
-        _ => Err("len() chỉ áp dụng cho chuỗi hoặc list".to_string()),
+        Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
+        _ => Err("len() chỉ áp dụng cho chuỗi, list hoặc map".to_string()),
     }
+}
+
+// Tìm vị trí của khóa trong map (theo thứ tự chèn). Khóa so bằng Value::eq.
+fn map_index(entries: &[(Value, Value)], key: &Value) -> Option<usize> {
+    entries.iter().position(|(k, _)| k == key)
 }
 
 fn native_get(args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
-        return Err("get() cần 2 đối số (list, chỉ số)".to_string());
+        return Err("get() cần 2 đối số (list/map, chỉ số/khóa)".to_string());
     }
-    let Value::List(items) = &args[0] else {
-        return Err("get() cần list ở đối số đầu".to_string());
-    };
-    let Value::Int(i) = args[1] else {
-        return Err("get() cần số nguyên ở đối số thứ 2".to_string());
-    };
-    if i < 0 || i as usize >= items.len() {
-        return Err(format!(
-            "get(): chỉ số {} ngoài phạm vi (len={})",
-            i,
-            items.len()
-        ));
+    match &args[0] {
+        Value::List(items) => {
+            let Value::Int(i) = args[1] else {
+                return Err("get(list, i) cần số nguyên ở đối số thứ 2".to_string());
+            };
+            if i < 0 || i as usize >= items.len() {
+                return Err(format!(
+                    "get(): chỉ số {} ngoài phạm vi (len={})",
+                    i,
+                    items.len()
+                ));
+            }
+            Ok(items[i as usize].clone())
+        }
+        Value::Map(entries) => match map_index(entries, &args[1]) {
+            Some(i) => Ok(entries[i].1.clone()),
+            None => Err(format!("get(map, khóa) — không có khóa này trong map")),
+        },
+        _ => Err("get() cần list hoặc map ở đối số đầu".to_string()),
     }
-    Ok(items[i as usize].clone())
 }
 
 fn native_contains(args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
-        return Err("contains() cần 2 đối số (list/chuỗi, x)".to_string());
+        return Err("contains() cần 2 đối số (list/chuỗi/map, x)".to_string());
     }
     match &args[0] {
         Value::List(items) => Ok(Value::Bool(items.contains(&args[1]))),
@@ -627,8 +664,135 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
             };
             Ok(Value::Bool(s.contains(sub)))
         }
-        _ => Err("contains() cần list hoặc chuỗi ở đối số đầu".to_string()),
+        Value::Map(entries) => Ok(Value::Bool(map_index(entries, &args[1]).is_some())),
+        _ => Err("contains() cần list, chuỗi hoặc map ở đối số đầu".to_string()),
     }
+}
+
+fn native_map(args: &[Value]) -> Result<Value, String> {
+    if args.len() % 2 != 0 {
+        return Err("map() cần số chẵn đối số (khóa, giá trị, khóa, giá trị, ...)".to_string());
+    }
+    let mut entries: Vec<(Value, Value)> = Vec::with_capacity(args.len() / 2);
+    let mut i = 0;
+    while i < args.len() {
+        let key = args[i].clone();
+        let value = args[i + 1].clone();
+        // Khóa trùng thì ghi đè thay vì thêm bản thứ hai.
+        if let Some(idx) = map_index(&entries, &key) {
+            entries[idx].1 = value;
+        } else {
+            entries.push((key, value));
+        }
+        i += 2;
+    }
+    Ok(Value::Map(entries))
+}
+
+fn native_map_set(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 3 {
+        return Err("map_set() cần 3 đối số (map, khóa, giá trị)".to_string());
+    }
+    let Value::Map(entries) = &args[0] else {
+        return Err("map_set() cần map ở đối số đầu".to_string());
+    };
+    let mut out = entries.clone();
+    let key = args[1].clone();
+    if let Some(idx) = map_index(&out, &key) {
+        out[idx].1 = args[2].clone();
+    } else {
+        out.push((key, args[2].clone()));
+    }
+    Ok(Value::Map(out))
+}
+
+fn native_map_keys(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("map_keys() cần 1 đối số".to_string());
+    }
+    let Value::Map(entries) = &args[0] else {
+        return Err("map_keys() cần map ở đối số đầu".to_string());
+    };
+    Ok(Value::List(entries.iter().map(|(k, _)| k.clone()).collect()))
+}
+
+fn native_chars(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("chars() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("chars() cần chuỗi".to_string());
+    };
+    Ok(Value::List(
+        s.chars().map(|c| Value::Str(c.to_string())).collect(),
+    ))
+}
+
+fn native_to_int(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("to_int() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("to_int() cần chuỗi".to_string());
+    };
+    s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+        format!("to_int(): '{}' không phải số nguyên", s)
+    })
+}
+
+fn native_ord(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("ord() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("ord() cần chuỗi 1 ký tự".to_string());
+    };
+    match s.chars().next() {
+        Some(c) => Ok(Value::Int(c as i64)),
+        None => Err("ord(): chuỗi rỗng".to_string()),
+    }
+}
+
+fn native_map_remove(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("map_remove() cần 2 đối số (map, khóa)".to_string());
+    }
+    let Value::Map(entries) = &args[0] else {
+        return Err("map_remove() cần map ở đối số đầu".to_string());
+    };
+    let out: Vec<(Value, Value)> = entries
+        .iter()
+        .filter(|(k, _)| k != &args[1])
+        .cloned()
+        .collect();
+    Ok(Value::Map(out))
+}
+
+fn native_read_file(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("read_file() cần 1 đối số (đường dẫn)".to_string());
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err("read_file() cần chuỗi đường dẫn".to_string());
+    };
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read_file('{}') thất bại: {}", path, e))?;
+    Ok(Value::Str(content))
+}
+
+fn native_write_file(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("write_file() cần 2 đối số (đường dẫn, nội dung)".to_string());
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err("write_file() cần chuỗi đường dẫn".to_string());
+    };
+    let Value::Str(content) = &args[1] else {
+        return Err("write_file() cần nội dung là chuỗi".to_string());
+    };
+    std::fs::write(path, content)
+        .map_err(|e| format!("write_file('{}') thất bại: {}", path, e))?;
+    Ok(Value::Bool(true))
 }
 
 fn native_range(args: &[Value]) -> Result<Value, String> {
@@ -753,6 +917,19 @@ mod tests {
         Parser::new(Lexer::new(src).tokenize().unwrap())
             .parse()
             .unwrap()
+    }
+
+    // Chạy một closure sinh ra Result<(), String> trên thread stack 64MB (giống
+    // production) để đệ quy sâu không tràn stack thread test.
+    fn run_on_big_stack<F>(f: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String> + Send + 'static,
+    {
+        let handle = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn thread lớn thất bại");
+        handle.join().expect("thread panicked")
     }
 
     fn run(src: &str) -> Result<(), String> {
@@ -921,15 +1098,90 @@ mod tests {
 
     #[test]
     fn deep_recursion_hits_limit_not_stack_overflow() {
-        let src = "func f(n) { return f(n + 1); } f(0);";
-        let err = run(src).unwrap_err();
+        // Chạy trên thread stack lớn để giới hạn MAX_CALL_DEPTH (chứ không phải
+        // stack OS) kích hoạt — nếu không, thread test stack nhỏ sẽ tràn trước.
+        let src = "func f(n) { return f(n + 1); } f(0);".to_string();
+        let run_result = run_on_big_stack(move || Interpreter::new().run(&program(&src)));
+        let err = run_result.unwrap_err();
         assert!(err.contains("Độ sâu"));
+    }
+
+    #[test]
+    fn legit_deep_recursion_works_after_limit_raise() {
+        // Kiểm tra đệ quy sâu hợp lệ (lớn hơn giới hạn cũ 128) vẫn chạy được.
+        let src = "func f(n) { if n >= 1000 { return 0; } return f(n + 1); }".to_string();
+        let run_result = run_on_big_stack(move || Interpreter::new().run(&program(&src)));
+        run_result.unwrap();
     }
 
     #[test]
     fn split_empty_separator_errors() {
         let err = run(r#"let a = split("ab", "");"#).unwrap_err();
         assert!(err.contains("rỗng"));
+    }
+
+    // ----- map (M4.1) -----
+
+    #[test]
+    fn map_operations() {
+        let src = r#"let m = map("a", 1, "b", 2);
+            let v = get(m, "a");
+            let has = contains(m, "b");
+            let not_has = contains(m, "z");
+            let size = len(m);
+            let keys = map_keys(m);
+            let m2 = map_set(m, "c", 3);
+            let size2 = len(m2);
+            let rem = map_remove(m2, "a");
+            let rem_size = len(rem);"#;
+        assert_eq!(run_and_get(src, "v"), Value::Int(1));
+        assert_eq!(run_and_get(src, "has"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "not_has"), Value::Bool(false));
+        assert_eq!(run_and_get(src, "size"), Value::Int(2));
+        assert_eq!(
+            run_and_get(src, "keys"),
+            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())])
+        );
+        assert_eq!(run_and_get(src, "size2"), Value::Int(3));
+        assert_eq!(run_and_get(src, "rem_size"), Value::Int(2));
+    }
+
+    #[test]
+    fn map_nested() {
+        let src = r#"let inner = map("x", 10); let outer = map("p", inner); let v = get(get(outer, "p"), "x");"#;
+        assert_eq!(run_and_get(src, "v"), Value::Int(10));
+    }
+
+    #[test]
+    fn map_missing_key_errors() {
+        let err = run(r#"let m = map("a", 1); let v = get(m, "zz");"#).unwrap_err();
+        assert!(err.contains("khóa"));
+    }
+
+    #[test]
+    fn map_dup_key_overwrites() {
+        assert_eq!(
+            run_and_get(r#"let m = map("a", 1, "a", 2);"#, "m"),
+            Value::Map(vec![(Value::Str("a".into()), Value::Int(2))])
+        );
+    }
+
+    // ----- file I/O (M4.2) -----
+
+    #[test]
+    fn file_io_roundtrip() {
+        let path = std::env::temp_dir().join("kinet_m4_io.tmp");
+        let path_str = path.display().to_string();
+        run(&format!("write_file(\"{}\", \"hello demo\");", path_str)).unwrap();
+        let got = run_and_get(&format!("let s = read_file(\"{}\");", path_str), "s");
+        assert_eq!(got, Value::Str("hello demo".into()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_missing_errors() {
+        let err = run(r#"let s = read_file("/no/such/file_kinet_xyz");"#).unwrap_err();
+        assert!(err.contains("thất bại"));
     }
 
     #[test]

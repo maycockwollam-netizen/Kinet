@@ -1,0 +1,114 @@
+// mini_interp.kinet — "viết một ngôn ngữ khác bằng Kinet"
+//
+// Một trình thông dịch con (tính biểu thức số học) được VIẾT HOÀN TOÀN bằng Kinet:
+//   tokenize → parse (recursive descent) → tính.
+// Bằng chứng rằng Kinet đủ mạnh để tự viết trình thông dịch / ngôn ngữ khác.
+// Dùng các native: chars, ord, to_int, append, get, len.
+
+// ---------- Lexer con ----------
+func tokenize(src) {
+    let cs = chars(src);
+    let n = len(cs);
+    let out = [];
+    let i = 0;
+
+    while i < n {
+        let c = get(cs, i);
+
+        // bỏ khoảng trắng
+        if c == " " or c == "\t" or c == "\n" {
+            i = i + 1;
+            continue;
+        }
+        // toán tử / ngoặc
+        if c == "(" or c == ")" or c == "+" or c == "-" or c == "*" or c == "/" {
+            out = append(out, c);
+            i = i + 1;
+            continue;
+        }
+        // chữ số → gom thành số
+        if ord(c) >= ord("0") and ord(c) <= ord("9") {
+            let num = "";
+            while i < n and ord(get(cs, i)) >= ord("0") and ord(get(cs, i)) <= ord("9") {
+                num = num + get(cs, i);
+                i = i + 1;
+            }
+            out = append(out, num);
+            continue;
+        }
+        println("  ⚠️  Ký tự lạ bỏ qua: '", c, "'");
+        i = i + 1;
+    }
+    return out;
+}
+
+// ---------- Parser con (recursive descent) ----------
+let tokens = [];   // danh sách token (biến chung, các hàm đọc/ghi)
+let pos = 0;       // con trỏ đọc token
+
+func peek() {
+    if pos >= len(tokens) {
+        return "";
+    }
+    return get(tokens, pos);
+}
+
+func advance() {
+    let t = get(tokens, pos);
+    pos = pos + 1;
+    return t;
+}
+
+func parse_primary() {
+    let t = peek();
+    if t == "(" {
+        advance();                  // bỏ '('
+        let v = parse_expr();
+        if peek() == ")" { advance(); }   // bỏ ')'
+        return v;
+    }
+    if t == "-" {
+        advance();
+        return 0 - parse_primary();      // unary minus
+    }
+    return to_int(advance());            // số
+}
+
+func parse_factor() {
+    let v = parse_primary();
+    while peek() == "*" or peek() == "/" {
+        let op = advance();
+        let r = parse_primary();
+        if op == "*" { v = v * r; } else { v = v / r; }
+    }
+    return v;
+}
+
+func parse_term() {
+    let v = parse_factor();
+    while peek() == "+" or peek() == "-" {
+        let op = advance();
+        let r = parse_factor();
+        if op == "+" { v = v + r; } else { v = v - r; }
+    }
+    return v;
+}
+
+func parse_expr() {
+    return parse_term();
+}
+
+func eval_expr(src) {
+    tokens = tokenize(src);
+    pos = 0;
+    return parse_expr();
+}
+
+// ---------- Thử nghiệm ----------
+println("Mini-interpreter VIẾT BẰNG KINET — tính biểu thức số học:");
+println("  2 + 3 * 4          = ", eval_expr("2 + 3 * 4"));
+println("  (2 + 3) * 4        = ", eval_expr("(2 + 3) * 4"));
+println("  10 / (2 + 3)       = ", eval_expr("10 / (2 + 3)"));
+println("  2 * 3 - 4 + 6 / 2  = ", eval_expr("2 * 3 - 4 + 6 / 2"));
+println("  -3 + 5             = ", eval_expr("-3 + 5"));
+println("  (((2)))            = ", eval_expr("(((2)))"));
