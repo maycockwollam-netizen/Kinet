@@ -675,6 +675,18 @@ impl Interpreter {
                 value,
                 clauses,
             } => self.eval_dict_comp(key, value, clauses, env),
+            Expr::MethodCall {
+                target,
+                name,
+                args,
+            } => {
+                let receiver = self.eval(target, env.clone())?;
+                let mut arg_values = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_values.push(self.eval(a, env.clone())?);
+                }
+                self.call_method(receiver, name, arg_values)
+            }
         }
     }
 
@@ -1119,6 +1131,75 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             TokenKind::Bor => "|",
             _ => "?",
         }
+    }
+
+    // `x.method(args)` — chọn native tương ứng theo kiểu của receiver rồi gọi
+    // với [receiver, args...]. Mọi phương thức đều THUẦN (không sửa biến gốc),
+    // nhất quán với thiết kế functional của Kinet (append/map_set trả bản mới).
+    fn call_method(&mut self, receiver: Value, name: &str, args: Vec<Value>) -> Result<Value, String> {
+        let builtin: &str = match &receiver {
+            Value::Str(_) => match name {
+                "upper" => "to_upper",
+                "lower" => "to_lower",
+                "trim" => "trim",
+                "split" => "split",
+                "starts_with" => "starts_with",
+                "ends_with" => "ends_with",
+                "contains" => "contains",
+                "replace" => "replace",
+                "len" => "len",
+                "chars" => "chars",
+                "ord" => "ord",
+                "to_int" => "to_int",
+                "to_float" => "to_float",
+                "substring" => "substring",
+                "lines" => "read_lines",
+                _ => return Err(self.method_err(&receiver, name)),
+            },
+            Value::List(_) => match name {
+                "append" => "append",
+                "len" => "len",
+                "contains" => "contains",
+                "get" => "get",
+                "join" => "list_join",
+                "map" => "map",
+                "filter" => "filter",
+                "reverse" => return self.slice_value(&receiver, None, None, -1),
+                _ => return Err(self.method_err(&receiver, name)),
+            },
+            Value::Map(_) => match name {
+                "get" => "get",
+                "contains" => "contains",
+                "keys" => "map_keys",
+                "set" => "map_set",
+                "remove" => "map_remove",
+                "len" => "len",
+                _ => return Err(self.method_err(&receiver, name)),
+            },
+            Value::Int(_) | Value::Float(_) => match name {
+                "abs" => "abs",
+                "round" => "round",
+                "floor" => "floor",
+                "ceil" => "ceil",
+                "to_int" => "to_int",
+                "to_float" => "to_float",
+                _ => return Err(self.method_err(&receiver, name)),
+            },
+            _ => return Err(self.method_err(&receiver, name)),
+        };
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push(receiver.clone());
+        all.extend(args);
+        let func = self.globals.borrow().get(builtin)?;
+        self.call(func, all)
+    }
+
+    fn method_err(&self, receiver: &Value, name: &str) -> String {
+        format!(
+            "giá trị {} không có phương thức '{}'",
+            self.to_string(receiver),
+            name
+        )
     }
 
     fn call(&mut self, func: Value, args: Vec<Value>) -> Result<Value, String> {
@@ -2962,6 +3043,134 @@ mod tests {
         assert_eq!(run_and_get(src, "r"), Value::List(
             vec![Value::Int(0), Value::Int(1), Value::Int(2)]
         ));
+    }
+
+    // ----- method calls -----
+
+    #[test]
+    fn string_methods() {
+        assert_eq!(
+            run_and_get(r#"let r = "  Kinet  ".trim().upper();"#, "r"),
+            Value::Str("KINET".into())
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "a,b,c".split(",").len();"#, "r"),
+            Value::Int(3)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "hello".contains("ell");"#, "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "abcabc".replace("a", "X");"#, "r"),
+            Value::Str("XbcXbc".into())
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "42".to_int() + 1;"#, "r"),
+            Value::Int(43)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "xin chào".len();"#, "r"),
+            Value::Int(8)
+        );
+    }
+
+    #[test]
+    fn list_methods_are_pure() {
+        // append/reverse không sửa biến gốc (thiết kế functional của Kinet).
+        let src = r#"let a = [1, 2, 3];
+            let b = a.append(4);
+            let r1 = b;
+            let r2 = a;"#;
+        assert_eq!(
+            run_and_get(src, "r1"),
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+        );
+        assert_eq!(
+            run_and_get(src, "r2"),
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+        assert_eq!(
+            run_and_get(r#"let r = [1, 2, 3].reverse();"#, "r"),
+            Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)])
+        );
+        assert_eq!(
+            run_and_get(r#"let r = [1, 2, 3].get(1);"#, "r"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = ["a", "b"].join("-");"#, "r"),
+            Value::Str("a-b".into())
+        );
+    }
+
+    #[test]
+    fn list_methods_higher_order() {
+        assert_eq!(
+            run_and_get(
+                r#"let r = [1, 2, 3].map(func(x) { return x * 10; });"#,
+                "r"
+            ),
+            Value::List(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+        );
+        assert_eq!(
+            run_and_get(
+                r#"let r = [1, 2, 3, 4].filter(func(x) { return x % 2 == 0; });"#,
+                "r"
+            ),
+            Value::List(vec![Value::Int(2), Value::Int(4)])
+        );
+    }
+
+    #[test]
+    fn map_methods_are_pure() {
+        let src = r#"let m = { "x": 1 };
+            let m2 = m.set("y", 2);
+            let r1 = m2.get("y");
+            let r2 = m.contains("y");
+            let r3 = m.keys().len();"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(2));
+        assert_eq!(run_and_get(src, "r2"), Value::Bool(false));
+        assert_eq!(run_and_get(src, "r3"), Value::Int(1));
+        assert_eq!(run_and_get(r#"let m = {"a": 5}; let r = m.get("a");"#, "r"), Value::Int(5));
+    }
+
+    #[test]
+    fn number_methods() {
+        assert_eq!(run_and_get(r#"let r = (-7).abs();"#, "r"), Value::Int(7));
+        assert_eq!(run_and_get(r#"let r = 2.6.round();"#, "r"), Value::Int(3));
+        assert_eq!(run_and_get(r#"let r = 2.6.floor();"#, "r"), Value::Int(2));
+        assert_eq!(run_and_get(r#"let r = 2.4.ceil();"#, "r"), Value::Int(3));
+        assert_eq!(run_and_get(r#"let r = 3.to_float();"#, "r"), Value::Float(3.0));
+    }
+
+    #[test]
+    fn method_chain_on_complex_target() {
+        // Target phức: kết quả hàm, index, slice... đều gọi được phương thức.
+        let src = r#"let r = " a b ".trim().split(" ").len();"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(2));
+        let src2 = r#"let r = [1, 2, 3, 4][1:].reverse().append(99);"#;
+        assert_eq!(
+            run_and_get(src2, "r"),
+            Value::List(vec![Value::Int(4), Value::Int(3), Value::Int(2), Value::Int(99)])
+        );
+    }
+
+    #[test]
+    fn unknown_or_wrong_type_method_errors() {
+        let err = run(r#"let r = [1].upper();"#).unwrap_err();
+        assert!(err.contains("upper"), "lỗi lạ: {}", err);
+        let err2 = run(r#"let r = "abc".append(1);"#).unwrap_err();
+        assert!(err2.contains("append"), "lỗi lạ: {}", err2);
+        let err3 = run(r#"let r = 5.not_a_method();"#).unwrap_err();
+        assert!(err3.contains("not_a_method"), "lỗi lạ: {}", err3);
+    }
+
+    #[test]
+    fn method_call_needs_parens() {
+        // Không có '(' sau '.method' → lỗi cú pháp (chưa hỗ trợ field access).
+        let tokens = crate::lexer::Lexer::new(r#"let r = "a".upper;"#).tokenize().unwrap();
+        assert!(Parser::new(tokens).parse().is_err());
     }
 
     // ----- float -----

@@ -162,6 +162,33 @@ a[-1];         // → 5                (chỉ số âm, đếm từ cuối)
 { i: i * i for i in range(1, 4) };               // → {1: 1, 2: 4, 3: 9}
 ```
 
+### Phương thức (method) — cú pháp `giá trị.tên(args)`
+Mọi phương thức đều là **đường tắt của hàm dựng sẵn** và **THUẦN** (không sửa biến gốc — khớp thiết kế functional: `a.append(x)` trả list mới, còn `a` không đổi).
+
+```kotlin
+// Chuỗi
+"  hi  ".trim().upper();      // → "HI"         (chuỗi lại được)
+"a,b,c".split(",");           // → ["a","b","c"]
+"abc".contains("b");          // → true
+"abc".ends_with("bc");        // → true
+"abab".replace("a", "X");     // → "XbXb"
+"42".to_int();  "3.5".to_float();  "abc".len();
+
+// List (thuần)
+[1, 2, 3].append(4);          // → [1,2,3,4]     (gốc [1,2,3] vẫn nguyên)
+[1, 2, 3].reverse();          // → [3,2,1]
+[1, 2, 3].len();  [1,2,3].contains(2);  [1,2,3].get(1);
+[1, 2].join("-");             // → "1-2"
+[1, 2, 3].map(func(x) { return x * 2; });    // → [2,4,6]
+[1, 2, 3, 4].filter(func(x) { return x % 2 == 0; });  // → [2,4]
+
+// Map (thuần)
+m.get("k");  m.set("k", v);  m.keys();  m.contains("k");  m.remove("k");  m.len();
+
+// Số
+(-7).abs();   2.6.round();   2.6.floor();   2.4.ceil();   3.to_float();
+```
+
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:

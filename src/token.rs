@@ -62,6 +62,7 @@ pub enum TokenKind {
     // Punctuation
     Comma,  // ,
     Semi,   // ;
+    Dot,    // . (phương thức: x.len())
     LParen, // (
     RParen, // )
     LBrace, // {

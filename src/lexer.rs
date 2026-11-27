@@ -66,6 +66,7 @@ impl Lexer {
             '}' => TokenKind::RBrace,
             ',' => TokenKind::Comma,
             ';' => TokenKind::Semi,
+            '.' => TokenKind::Dot,
             '[' => TokenKind::LBracket,
             ']' => TokenKind::RBracket,
             ':' => TokenKind::Colon,

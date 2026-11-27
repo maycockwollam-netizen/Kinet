@@ -441,6 +441,18 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             }
             out.push('}');
         }
+        Expr::MethodCall {
+            target,
+            name,
+            args,
+        } => {
+            p_expr(target, indent, out);
+            out.push('.');
+            out.push_str(name);
+            out.push('(');
+            p_exprs(args, indent + 1, out);
+            out.push(')');
+        }
     }
 }
 

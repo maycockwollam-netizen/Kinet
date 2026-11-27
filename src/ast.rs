@@ -98,6 +98,12 @@ pub enum Expr {
         value: Box<Expr>,
         clauses: Vec<CompClause>,
     },
+    // Phương thức: `receiver.method(args)` — desugar thành native có sẵn.
+    MethodCall {
+        target: Box<Expr>,
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

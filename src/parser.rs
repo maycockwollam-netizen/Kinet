@@ -370,6 +370,32 @@ impl Parser {
                     callee: Box::new(callee),
                     args,
                 };
+            } else if self.match_or(TokenKind::Dot) {
+                // Phương thức: expr.name(args) — target có thể là bất kỳ biểu thức
+                // nào, chuỗi được với nhau (x.f().g()).
+                let name = self.expect_ident("tên phương thức sau '.'")?;
+                self.consume(
+                    TokenKind::LParen,
+                    &format!("mong đợi '(' sau phương thức '{}'", name),
+                )?;
+                let mut margs = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        margs.push(self.expression()?);
+                        if !self.match_or(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.consume(
+                    TokenKind::RParen,
+                    "mong đợi ')' sau đối số phương thức",
+                )?;
+                callee = Expr::MethodCall {
+                    target: Box::new(callee),
+                    name,
+                    args: margs,
+                };
             } else if self.match_or(TokenKind::LBracket) {
                 // arr[i] / m["k"] / grid[r][c] — hoặc slice arr[i:j] / arr[:j] / arr[::k].
                 if self.check(&TokenKind::Colon) {
