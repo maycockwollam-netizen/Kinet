@@ -185,6 +185,9 @@ pub struct FuncDef {
     pub params: Vec<String>,
     // Giá trị mặc định của tham số (đánh giá LÚC định nghĩa hàm, như Python).
     pub defaults: IndexMap<String, Value>,
+    // Tên biến `*rest` / `**kwargs` (None nếu không có).
+    pub rest_param: Option<String>,
+    pub kwargs_param: Option<String>,
     pub body: Vec<Stmt>,
     pub closure: EnvRef,
 }
@@ -425,7 +428,17 @@ impl Interpreter {
     ) -> Result<FuncDef, String> {
         let mut names = Vec::with_capacity(params.len());
         let mut defaults: IndexMap<String, Value> = IndexMap::new();
+        let mut rest_param = None;
+        let mut kwargs_param = None;
         for p in params {
+            if p.rest {
+                rest_param = Some(p.name.clone());
+                continue;
+            }
+            if p.kwargs {
+                kwargs_param = Some(p.name.clone());
+                continue;
+            }
             if let Some(def) = &p.default {
                 let v = self.eval(def, closure.clone())?;
                 defaults.insert(p.name.clone(), v);
@@ -436,6 +449,8 @@ impl Interpreter {
             name: name.to_string(),
             params: names,
             defaults,
+            rest_param,
+            kwargs_param,
             body: body.to_vec(),
             closure,
         })
@@ -546,6 +561,28 @@ impl Interpreter {
                 // biến khai báo trong if không rò ra ngoài.
                 let scope = std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
                 self.exec_block(branch, scope)
+            }
+            Stmt::With { expr, var, body } => {
+                // Context manager: __enter__() -> thân -> __exit__() (luôn gọi).
+                let manager = self.eval(expr, env.clone())?;
+                let entered = self.call_method(manager.clone(), "__enter__", Vec::new())?;
+                let scope =
+                    std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                if let Some(v) = var {
+                    scope.borrow_mut().define(v, entered);
+                }
+                let result = self.exec_block(body, scope);
+                // __exit__ nhận nil (thành công) hoặc chuỗi lỗi (thất bại).
+                let exc = match &result {
+                    Err(e) => Value::Str(e.clone()),
+                    Ok(_) => Value::Nil,
+                };
+                let exit_res = self.call_method(manager, "__exit__", vec![exc]);
+                match (result, exit_res) {
+                    (Err(e), _) => Err(e),
+                    (Ok(_), Err(e2)) => Err(format!("__exit__() lỗi: {}", e2)),
+                    (Ok(flow), Ok(_)) => Ok(flow),
+                }
             }
             Stmt::While { cond, body } => {
                 loop {
@@ -1169,6 +1206,9 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             TokenKind::Percent => self.num_arith(&lv, &rv, op),
             TokenKind::Eq => Ok(Value::Bool(lv == rv)),
             TokenKind::NotEq => Ok(Value::Bool(lv != rv)),
+            // `is`/`is not` — với kiểu value, danh tính = bằng giá trị.
+            TokenKind::Is => Ok(Value::Bool(lv == rv)),
+            TokenKind::IsNot => Ok(Value::Bool(lv != rv)),
             TokenKind::Lt => self.cmp_values(&lv, &rv, op),
             TokenKind::Gt => self.cmp_values(&lv, &rv, op),
             TokenKind::Le => self.cmp_values(&lv, &rv, op),
@@ -1384,6 +1424,8 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             TokenKind::Le => "<=",
             TokenKind::Ge => ">=",
             TokenKind::In => "in",
+            TokenKind::Is => "is",
+            TokenKind::IsNot => "is not",
             TokenKind::Shl => "<<",
             TokenKind::Shr => ">>",
             TokenKind::Band => "&",
@@ -1487,6 +1529,8 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             name: def.name.clone(),
             params: def.params.clone(),
             defaults: def.defaults.clone(),
+            rest_param: def.rest_param.clone(),
+            kwargs_param: def.kwargs_param.clone(),
             body: def.body.clone(),
             closure: env,
         };
@@ -1653,28 +1697,37 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 MAX_CALL_DEPTH
             ));
         }
-        // Bind đối số: vị trí → tham số theo thứ tự, keyword → theo tên, còn lại
-        // dùng giá trị mặc định. Thiếu tham số không có mặc định → lỗi.
+        // Bind đối số: vị trí → tham số theo thứ tự, keyword → theo tên; dư ra cho
+        // `*rest` / `**kwargs` (nếu có); còn lại dùng mặc định.
+        let n_named = def.params.len();
         let mut bound: IndexMap<String, Value> = IndexMap::new();
-        if pos.len() > def.params.len() {
-            return Err(format!(
-                "Hàm '{}' có {} tham số, nhận {} đối số vị trí",
-                def.name,
-                def.params.len(),
-                pos.len()
-            ));
-        }
+        let mut rest_items: Vec<Value> = Vec::new();
         for (i, v) in pos.into_iter().enumerate() {
-            bound.insert(def.params[i].clone(), v);
+            if i < n_named {
+                bound.insert(def.params[i].clone(), v);
+            } else if def.rest_param.is_some() {
+                rest_items.push(v);
+            } else {
+                return Err(format!(
+                    "Hàm '{}' có {} tham số, nhận {} đối số vị trí",
+                    def.name,
+                    n_named,
+                    i + 1
+                ));
+            }
         }
+        let mut kw_items: IndexMap<Value, Value> = IndexMap::new();
         for (k, v) in named {
-            if !def.params.contains(&k) {
+            if def.params.contains(&k) {
+                if bound.contains_key(&k) {
+                    return Err(format!("Tham số '{}' được cung cấp hai lần", k));
+                }
+                bound.insert(k, v);
+            } else if def.kwargs_param.is_some() {
+                kw_items.insert(Value::Str(k), v);
+            } else {
                 return Err(format!("Hàm '{}' không có tham số '{}'", def.name, k));
             }
-            if bound.contains_key(&k) {
-                return Err(format!("Tham số '{}' được cung cấp hai lần", k));
-            }
-            bound.insert(k, v);
         }
         for (name, default) in &def.defaults {
             if !bound.contains_key(name) {
@@ -1685,6 +1738,12 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             if !bound.contains_key(p) {
                 return Err(format!("Hàm '{}' thiếu đối số '{}'", def.name, p));
             }
+        }
+        if let Some(r) = &def.rest_param {
+            bound.insert(r.clone(), Value::List(rest_items));
+        }
+        if let Some(kw) = &def.kwargs_param {
+            bound.insert(kw.clone(), Value::Map(kw_items));
         }
 
         // Môi trường mới có cha là closure của hàm (hỗ trợ biến non-local).
@@ -2912,7 +2971,7 @@ mod tests {
         F: FnOnce() -> Result<(), String> + Send + 'static,
     {
         let handle = std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(512 * 1024 * 1024)
             .spawn(f)
             .expect("spawn thread lớn thất bại");
         handle.join().expect("thread panicked")
@@ -4295,6 +4354,83 @@ mod tests {
             let v = if x > 10 { "A" } elif x > 1 { "B" } else { "C" };
             let r = v;"#;
         assert_eq!(run_and_get(src2, "r"), Value::Str("B".into()));
+    }
+
+    // ----- *args / **kwargs / is / with -----
+
+    #[test]
+    fn variadic_args() {
+        let src = r#"func sum_all(acc, *rest) {
+                for n in rest { acc = acc + n; }
+                return acc;
+            }
+            let r1 = sum_all(0, 1, 2, 3);
+            let r2 = sum_all(10);"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(6));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(10));
+    }
+
+    #[test]
+    fn variadic_kwargs() {
+        let src = r#"func count(**kw) { return kw.keys().len(); }
+            let r1 = count(a = 1, b = 2);
+            let r2 = count();"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(2));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(0));
+        // *rest + **kwargs cùng lúc
+        let src2 = r#"func f(a, *rest, **kw) { return a + len(rest) + len(kw); }
+            let r3 = f(1, 2, 3, x = 4, y = 5);"#;
+        // a=1, rest=[2,3] (2), kw={x,y} (2) → 1+2+2 = 5
+        assert_eq!(run_and_get(src2, "r3"), Value::Int(5));
+    }
+
+    #[test]
+    fn kwargs_dict_content() {
+        let src = r#"func opts(**kw) { return kw.get("mode"); }
+            let r = opts(mode = "fast", verbose = true);"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str("fast".into()));
+    }
+
+    #[test]
+    fn is_is_not() {
+        assert_eq!(run_and_get(r#"let r = 1 is 1;"#, "r"), Value::Bool(true));
+        assert_eq!(run_and_get(r#"let r = 1 is 2;"#, "r"), Value::Bool(false));
+        assert_eq!(run_and_get(r#"let r = "a" is "a";"#, "r"), Value::Bool(true));
+        assert_eq!(run_and_get(r#"let r = 1 is not 2;"#, "r"), Value::Bool(true));
+        // Với struct (value), `is` so theo nội dung.
+        let src = r#"struct P { x = 0; } let r = P(1) is P(1);"#;
+        assert_eq!(run_and_get(src, "r"), Value::Bool(true));
+    }
+
+    #[test]
+    fn with_runs_enter_body_exit() {
+        let src = r#"let log = [];
+            struct C {
+                func __enter__() { log = append(log, "enter"); return self; }
+                func __exit__(exc) { log = append(log, "exit:" + str(exc)); return true; }
+            }
+            with C() as c { log = append(log, "body"); }
+            let r = list_join(log, ",");"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str(r#"enter,body,exit:nil"#.into()));
+    }
+
+    #[test]
+    fn with_exit_runs_on_error_and_keeps_error() {
+        let src = r#"let log = [];
+            struct C {
+                func __enter__() { log = append(log, "in"); return self; }
+                func __exit__(exc) { log = append(log, "exit"); return true; }
+            }
+            try { with C() { let x = 1 / 0; } }
+            catch e { log = append(log, "caught"); }
+            let r = list_join(log, ",");"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str("in,exit,caught".into()));
+    }
+
+    #[test]
+    fn with_requires_context_manager() {
+        let src = r#"with 42 { println(1); }"#;
+        assert!(run(src).is_err());
     }
 
     // ----- float -----

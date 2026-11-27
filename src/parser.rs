@@ -51,6 +51,7 @@ impl Parser {
             TokenKind::Struct => self.struct_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
+            TokenKind::With => self.with_stmt(),
             TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
             TokenKind::Throw => self.throw_stmt(),
@@ -260,6 +261,24 @@ impl Parser {
         })
     }
 
+    fn with_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // with
+        let expr = self.expression()?;
+        // `as tên` tùy chọn (từ khóa 'as' được lex thành Ident).
+        let var = if let TokenKind::Ident(word) = &self.peek().kind {
+            if word == "as" {
+                self.advance();
+                Some(self.expect_ident("tên biến sau 'as'")?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let body = self.block()?;
+        Ok(Stmt::With { expr, var, body })
+    }
+
     fn return_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // return
         // `return;` không giá trị = trả về Nil; `return x, y;` = trả tuple.
@@ -418,7 +437,7 @@ impl Parser {
         Ok(result.unwrap_or(acc))
     }
 
-    // Trả về toán tử so sánh hiện tại (gồm `not in`), nếu có.
+    // Trả về toán tử so sánh hiện tại (gồm `not in`, `is`, `is not`), nếu có.
     fn peek_comparison_op(&self) -> Option<TokenKind> {
         if self.check(&TokenKind::Lt) {
             Some(TokenKind::Lt)
@@ -432,15 +451,19 @@ impl Parser {
             Some(TokenKind::In)
         } else if self.check(&TokenKind::Not) && self.peek_kind_at(1) == Some(TokenKind::In) {
             Some(TokenKind::NotIn)
+        } else if self.check(&TokenKind::Is) && self.peek_kind_at(1) == Some(TokenKind::Not) {
+            Some(TokenKind::IsNot)
+        } else if self.check(&TokenKind::Is) {
+            Some(TokenKind::Is)
         } else {
             None
         }
     }
 
-    // Ăn toán tử so sánh; riêng `not in` ăn cả hai token.
+    // Ăn toán tử so sánh; riêng `not in` / `is not` ăn cả hai token.
     fn consume_comparison_op(&mut self, op: &TokenKind) {
         self.advance();
-        if *op == TokenKind::NotIn {
+        if *op == TokenKind::NotIn || *op == TokenKind::IsNot {
             self.advance();
         }
     }
@@ -967,16 +990,39 @@ impl Parser {
         let mut params = Vec::new();
         if !self.check(&TokenKind::RParen) {
             loop {
+                // `*rest` hoặc `**kwargs` (mọi thứ còn lại).
+                let mut rest = false;
+                let mut kwargs = false;
+                if self.check(&TokenKind::Star) {
+                    if self.peek_kind_at(1) == Some(TokenKind::Star) {
+                        self.advance();
+                        self.advance();
+                        kwargs = true;
+                    } else {
+                        self.advance();
+                        rest = true;
+                    }
+                }
                 let name = self.expect_ident("tên tham số")?;
                 if params.iter().any(|p: &ParamDef| p.name == name) {
                     return Err(self.error(format!("tham số trùng tên '{}'", name)));
                 }
-                let default = if self.match_or(TokenKind::Assign) {
+                if kwargs && !self.check(&TokenKind::RParen) {
+                    return Err(self.error("'**kwargs' phải là tham số cuối cùng".to_string()));
+                }
+                let default = if rest || kwargs {
+                    None
+                } else if self.match_or(TokenKind::Assign) {
                     Some(self.expression()?)
                 } else {
                     None
                 };
-                params.push(ParamDef { name, default });
+                params.push(ParamDef {
+                    name,
+                    default,
+                    rest,
+                    kwargs,
+                });
                 if !self.match_or(TokenKind::Comma) {
                     break;
                 }

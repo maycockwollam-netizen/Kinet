@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     // Chạy mọi thứ trên thread stack lớn (64MB) để đệ quy sâu trong Kinet
     // không tràn stack trước khi chạm MAX_CALL_DEPTH.
     let spawned = std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(512 * 1024 * 1024)
         .spawn(run_all);
     match spawned {
         Ok(handle) => match handle.join() {
@@ -193,6 +193,17 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             out.push('\n');
             p_stmts(body, indent + 1, out);
         }
+        Stmt::With { expr, var, body } => {
+            p_indent(out, indent);
+            out.push_str("with ");
+            p_expr(expr, 0, out);
+            if let Some(v) = var {
+                out.push_str(" as ");
+                out.push_str(v);
+            }
+            out.push('\n');
+            p_stmts(body, indent + 1, out);
+        }
         Stmt::For {
             target,
             iterable,
@@ -314,6 +325,11 @@ fn p_params(params: &[ParamDef], out: &mut String) {
     for (i, p) in params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
+        }
+        if p.rest {
+            out.push('*');
+        } else if p.kwargs {
+            out.push_str("**");
         }
         out.push_str(&p.name);
         if let Some(def) = &p.default {
@@ -589,6 +605,8 @@ fn op_symbol(op: &TokenKind) -> &'static str {
         TokenKind::Le => "<=",
         TokenKind::Ge => ">=",
         TokenKind::In => "in",
+        TokenKind::Is => "is",
+        TokenKind::IsNot => "is not",
         TokenKind::Shl => "<<",
         TokenKind::Shr => ">>",
         TokenKind::Band => "&",

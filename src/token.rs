@@ -24,6 +24,8 @@ pub enum TokenKind {
     While,
     For,
     In,
+    Is,
+    With,
     Return,
     Throw,
     Break,
@@ -55,6 +57,7 @@ pub enum TokenKind {
     Le,     // <=
     Ge,     // >=
     NotIn,  // not in — chỉ dùng trong parser, desugar thành not (x in y)
+    IsNot,  // is not — chỉ dùng trong parser, desugar thành not (a is b)
     Shl,    // <<
     Shr,    // >>
     Band,   // &

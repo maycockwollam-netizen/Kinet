@@ -261,6 +261,24 @@ let grade = "A" if score >= 90 else "B";
 if x > 10 { } elif x > 3 { } else { }
 ```
 
+### `*args` / `**kwargs`, `is` / `is not`, `with`
+```kotlin
+func total(name, *rest) { ... }        // *rest gom đối số vị trí dư thành list
+func opts(**kw) { ... }                // **kw gom keyword dư thành map
+total("Tổng", 1, 2, 3);                // rest = [1, 2, 3]
+opts(a = 1, b = 2);                    // kw = {a: 1, b: 2}
+
+1 is 1;    "a" is not "b"              // `is`/`is not` — so bằng giá trị
+
+// Context manager: struct có __enter__/__exit__
+struct Logger {
+    log = [];
+    func __enter__() { ...; return self; }
+    func __exit__(exc) { ...; return true; }   // exc = nil hoặc chuỗi lỗi
+}
+with Logger() as lg { ... }            // __enter__ -> thân -> __exit__ (kể cả khi lỗi)
+```
+
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:

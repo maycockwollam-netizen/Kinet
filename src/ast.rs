@@ -2,11 +2,14 @@
 
 use crate::token::TokenKind;
 
-/// Một tham số hàm: tên + giá trị mặc định tùy chọn (`b = 5`).
+/// Một tham số hàm: tên + giá trị mặc định tùy chọn (`b = 5`),
+/// hoặc biến đối số `*rest` (`rest: true`) / `**kwargs` (`kwargs: true`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamDef {
     pub name: String,
     pub default: Option<Expr>,
+    pub rest: bool,
+    pub kwargs: bool,
 }
 
 /// Một đối số lúc gọi hàm: `f(x)` hoặc keyword `f(x = 1)`.
@@ -172,6 +175,12 @@ pub enum Stmt {
     },
     While {
         cond: Expr,
+        body: Vec<Stmt>,
+    },
+    // `with expr [as var] { body }` — context manager (__enter__/__exit__).
+    With {
+        expr: Expr,
+        var: Option<String>,
         body: Vec<Stmt>,
     },
     For {
