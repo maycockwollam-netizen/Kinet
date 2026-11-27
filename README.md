@@ -61,7 +61,7 @@ println(add(2, 5));
 | Chuỗi | `"xin chào"` (hỗ trợ `\n`, `\t`, `\"`, `\\`) |
 | Bool | `true`, `false` |
 | List | `[1, "hai", true]` — có thể trộn kiểu |
-| Map | `map("a", 1, "b", 2)` — cặp khóa/giá trị, giữ thứ tự chèn |
+| Map | `{ "a": 1, "b": 2 }` hoặc `map("a", 1, ...)` — giữ thứ tự chèn |
 | Hàm | `func f(x) { ... }` |
 | Nil | giá trị trả về mặc định |
 
@@ -88,6 +88,9 @@ println(add(2, 5));
 | `chars(s)` | list các ký tự (chuỗi 1 chữ) | `chars("ab")` → `["a","b"]` |
 | `ord(c)` | mã Unicode của ký tự đầu | `ord("0")` → `48` |
 | `to_int(s)` | chuỗi → số nguyên | `to_int("42")` → `42` |
+| `substring(s, start, len)` | cắt chuỗi | `substring("hello", 1, 3)` → `"ell"` |
+| `to_upper(s)` / `to_lower(s)` | viết hoa / thường | `to_upper("ab")` → `"AB"` |
+| `list_join(list, sep)` | nối list thành chuỗi | `list_join(["a","b"], "-")` → `"a-b"` |
 
 ### match — pattern dispatch (cho logic agent)
 ```c
@@ -124,6 +127,9 @@ func run_agent(goal, max_rounds) {
 ```
 
 Chạy demo: `cargo run -- examples/agent_real.kinet`
+
+Ví dụ **script agent đời thực**: `cargo run -- examples/sdk_workflow.kinet` — đọc danh sách
+task từ file → chạy agent thật từng task → gom kết quả vào list các map → ghi báo cáo ra file.
 
 ### Cấu hình biến môi trường
 | Biến | Ý nghĩa | Mặc định |
@@ -166,10 +172,12 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - [x] `for` loop + `break`/`continue`
 - [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
 - [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
-- [x] Unit test (48 test: lexer, parser, interpreter)
+- [x] Unit test (53 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
 - [x] **Mốc 3:** Kinet điều khiển agent Kinetic SDK thật (agent_run → bridge Python)
 - [x] **Mốc 4:** Kiểu `map`, file I/O, `chars`/`ord`/`to_int`, đệ quy sâu 2000 — đủ lập trình đa dụng; có `mini_interp.kinet` (viết trình thông dịch bằng Kinet)
+- [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`), `sdk_workflow.kinet` script agent đời thực
+- [ ] Giai đoạn A (phần 2): template chuỗi, bridge có cấu trúc + giữ tiến trình, stack trace
 - [ ] Nâng bridge lên embed PyO3 trực tiếp (bỏ spawn tiến trình)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

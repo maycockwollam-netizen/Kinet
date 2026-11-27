@@ -270,8 +270,32 @@ impl Parser {
                 }
                 Ok(Expr::List(items))
             }
+            TokenKind::LBrace => {
+                // Trong ngữ cảnh biểu thức, '{' luôn là dict literal (block
+                // chỉ xuất hiện ở vị trí câu lệnh do block() phân tích).
+                self.dict_literal()
+            }
             other => Err(self.error_at(token.line, format!("mong đợi biểu thức, gặp {:?}", other))),
         }
+    }
+
+    fn dict_literal(&mut self) -> Result<Expr, String> {
+        // primary() đã ăn '{' trước khi gọi hàm này.
+        let mut entries: Vec<(Expr, Expr)> = Vec::new();
+        if self.match_or(TokenKind::RBrace) {
+            return Ok(Expr::Dict(entries)); // {}
+        }
+        loop {
+            let key = self.expression()?;
+            self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
+            let value = self.expression()?;
+            entries.push((key, value));
+            if !self.match_or(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
+        Ok(Expr::Dict(entries))
     }
 
     fn match_expr(&mut self) -> Result<Expr, String> {

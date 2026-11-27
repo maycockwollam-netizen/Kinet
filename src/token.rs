@@ -53,6 +53,7 @@ pub enum TokenKind {
     RBrace, // }
     LBracket, // [
     RBracket, // ]
+    Colon,  // :
 
     Eof,
 }

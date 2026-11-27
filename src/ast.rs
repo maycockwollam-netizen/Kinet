@@ -42,6 +42,7 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     List(Vec<Expr>),
+    Dict(Vec<(Expr, Expr)>),
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,

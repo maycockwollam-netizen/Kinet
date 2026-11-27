@@ -150,6 +150,10 @@ impl Interpreter {
                 ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
                 ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
                 ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
+                ("substring", native_substring as fn(&[Value]) -> Result<Value, String>),
+                ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
+                ("to_lower", native_to_lower as fn(&[Value]) -> Result<Value, String>),
+                ("list_join", native_list_join as fn(&[Value]) -> Result<Value, String>),
             ] {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
@@ -320,6 +324,19 @@ impl Interpreter {
                     out.push(self.eval(it, env.clone())?);
                 }
                 Ok(Value::List(out))
+            }
+            Expr::Dict(entries) => {
+                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let key = self.eval(k, env.clone())?;
+                    let value = self.eval(v, env.clone())?;
+                    if let Some(idx) = map_index(&out, &key) {
+                        out[idx].1 = value;
+                    } else {
+                        out.push((key, value));
+                    }
+                }
+                Ok(Value::Map(out))
             }
             Expr::Match { value, arms } => self.eval_match(value, arms, env),
         }
@@ -738,6 +755,71 @@ fn native_to_int(args: &[Value]) -> Result<Value, String> {
     s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
         format!("to_int(): '{}' không phải số nguyên", s)
     })
+}
+
+fn native_substring(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 3 {
+        return Err("substring() cần 3 đối số (chuỗi, bắt đầu, độ dài)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("substring() cần chuỗi ở đối số đầu".to_string());
+    };
+    let Value::Int(start) = args[1] else {
+        return Err("substring() cần số nguyên (vị trí bắt đầu)".to_string());
+    };
+    let Value::Int(len) = args[2] else {
+        return Err("substring() cần số nguyên (độ dài)".to_string());
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len() as i64;
+    if start < 0 || len < 0 || start > n {
+        return Err(format!(
+            "substring(): vị trí {} ngoài phạm vi (len={})",
+            start, n
+        ));
+    }
+    let end = (start + len).min(n);
+    Ok(Value::Str(chars[start as usize..end as usize].iter().collect()))
+}
+
+fn native_to_upper(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("to_upper() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("to_upper() cần chuỗi".to_string());
+    };
+    Ok(Value::Str(s.to_uppercase()))
+}
+
+fn native_to_lower(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("to_lower() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("to_lower() cần chuỗi".to_string());
+    };
+    Ok(Value::Str(s.to_lowercase()))
+}
+
+fn native_list_join(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("list_join() cần 2 đối số (list, dấu phân tách)".to_string());
+    }
+    let Value::List(items) = &args[0] else {
+        return Err("list_join() cần list ở đối số đầu".to_string());
+    };
+    let Value::Str(sep) = &args[1] else {
+        return Err("list_join() cần dấu phân tách là chuỗi".to_string());
+    };
+    let strings: Vec<String> = items
+        .iter()
+        .map(|v| match v {
+            Value::Str(sv) => sv.clone(),
+            other => format!("{:?}", other),
+        })
+        .collect();
+    Ok(Value::Str(strings.join(sep)))
 }
 
 fn native_ord(args: &[Value]) -> Result<Value, String> {
@@ -1182,6 +1264,49 @@ mod tests {
     fn read_file_missing_errors() {
         let err = run(r#"let s = read_file("/no/such/file_kinet_xyz");"#).unwrap_err();
         assert!(err.contains("thất bại"));
+    }
+
+    #[test]
+    fn dict_literal_creates_map() {
+        let src = r#"let m = { "a": 1, "b": 2 };
+            let v = get(m, "b");
+            let has = contains(m, "a");
+            let size = len(m);"#;
+        assert_eq!(run_and_get(src, "v"), Value::Int(2));
+        assert_eq!(run_and_get(src, "has"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "size"), Value::Int(2));
+    }
+
+    #[test]
+    fn dict_literal_nested_and_empty() {
+        assert_eq!(
+            run_and_get(r#"let cfg = { "opts": { "retry": 3 } }; let r = get(get(cfg, "opts"), "retry");"#, "r"),
+            Value::Int(3)
+        );
+        assert_eq!(run_and_get(r#"let e = {};"#, "e"), Value::Map(vec![]));
+    }
+
+    #[test]
+    fn block_comment_is_ignored() {
+        assert_eq!(
+            run_and_get("/* chú thích\nnhiều dòng */ let x = 5;", "x"),
+            Value::Int(5)
+        );
+    }
+
+    #[test]
+    fn string_helpers() {
+        let src = r#"let up = to_upper("ab"); let lo = to_lower("AB"); let sub = substring("hello", 1, 3); let j = list_join(["x", "y"], "-");"#;
+        assert_eq!(run_and_get(src, "up"), Value::Str("AB".into()));
+        assert_eq!(run_and_get(src, "lo"), Value::Str("ab".into()));
+        assert_eq!(run_and_get(src, "sub"), Value::Str("ell".into()));
+        assert_eq!(run_and_get(src, "j"), Value::Str("x-y".into()));
+    }
+
+    #[test]
+    fn substring_out_of_range_errors() {
+        let err = run(r#"let s = substring("abc", 9, 1);"#).unwrap_err();
+        assert!(err.contains("ngoài phạm vi"));
     }
 
     #[test]

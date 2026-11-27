@@ -68,6 +68,7 @@ impl Lexer {
             ';' => TokenKind::Semi,
             '[' => TokenKind::LBracket,
             ']' => TokenKind::RBracket,
+            ':' => TokenKind::Colon,
             '=' => {
                 if self.match_char('=') {
                     TokenKind::Eq
@@ -209,6 +210,24 @@ impl Lexer {
                 Some('/') if self.chars.get(self.pos + 1) == Some(&'/') => {
                     while self.chars.get(self.pos).is_some_and(|c| *c != '\n') {
                         self.pos += 1;
+                    }
+                }
+                // comment /* ... */ (nhiều dòng được)
+                Some('/') if self.chars.get(self.pos + 1) == Some(&'*') => {
+                    self.pos += 2;
+                    loop {
+                        match self.chars.get(self.pos) {
+                            Some('*') if self.chars.get(self.pos + 1) == Some(&'/') => {
+                                self.pos += 2;
+                                break;
+                            }
+                            Some('\n') => {
+                                self.line += 1;
+                                self.pos += 1;
+                            }
+                            Some(_) => self.pos += 1,
+                            None => break, // /* chưa đóng — vẫn chấp nhận tới hết file
+                        }
                     }
                 }
                 _ => break,

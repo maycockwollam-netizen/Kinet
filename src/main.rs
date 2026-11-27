@@ -277,6 +277,18 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             p_exprs(items, indent + 1, out);
             out.push(']');
         }
+        Expr::Dict(entries) => {
+            out.push('{');
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                p_expr(k, indent + 1, out);
+                out.push_str(": ");
+                p_expr(v, indent + 1, out);
+            }
+            out.push('}');
+        }
         Expr::Match { value, arms } => {
             out.push_str("match ");
             p_expr(value, indent, out);
