@@ -2,6 +2,27 @@
 
 use crate::token::TokenKind;
 
+/// Một tham số hàm: tên + giá trị mặc định tùy chọn (`b = 5`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamDef {
+    pub name: String,
+    pub default: Option<Expr>,
+}
+
+/// Một đối số lúc gọi hàm: `f(x)` hoặc keyword `f(x = 1)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallArg {
+    pub name: Option<String>,
+    pub value: Expr,
+}
+
+/// Vế trái của `let`: biến đơn hoặc bóc tách tuple `let (a, b) = ...`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LetTarget {
+    Var(String),
+    Tuple(Vec<String>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     // Số, chuỗi, bool — so sánh bằng
@@ -56,7 +77,7 @@ pub enum Expr {
     },
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
     },
     Index {
         target: Box<Expr>,
@@ -69,12 +90,14 @@ pub enum Expr {
         value: Box<Expr>,
     },
     Lambda {
-        params: Vec<String>,
+        params: Vec<ParamDef>,
         body: Vec<Stmt>,
     },
     // Template chuỗi: danh sách phần (Str literal + biểu thức interpolated).
     Template(Vec<Expr>),
     List(Vec<Expr>),
+    // Tuple bất biến: `(1, 2)` / `return x, y;` trả về tuple.
+    Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Match {
         value: Box<Expr>,
@@ -121,7 +144,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDef {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<ParamDef>,
     pub body: Vec<Stmt>,
 }
 
@@ -134,7 +157,8 @@ pub enum Stmt {
     },
     Expr(Expr),
     Let {
-        name: String,
+        // `let x = ...` hoặc bóc tách `let (a, b) = ...`
+        target: LetTarget,
         value: Expr,
     },
     Print(Vec<Expr>),
@@ -149,7 +173,8 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     For {
-        var: String,
+        // `for x in ...` hoặc `for (a, b) in ...`
+        target: LetTarget,
         iterable: Expr,
         body: Vec<Stmt>,
     },
@@ -165,7 +190,7 @@ pub enum Stmt {
     },
     Func {
         name: String,
-        params: Vec<String>,
+        params: Vec<ParamDef>,
         body: Vec<Stmt>,
     },
     Struct {

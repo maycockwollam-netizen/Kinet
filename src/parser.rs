@@ -10,7 +10,7 @@
 //!   unary (- not)
 //!   primary / call
 
-use crate::ast::{CompClause, Expr, MatchArm, MethodDef, Pattern, Stmt};
+use crate::ast::{CallArg, CompClause, Expr, LetTarget, MatchArm, MethodDef, ParamDef, Pattern, Stmt};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
 
@@ -88,31 +88,17 @@ impl Parser {
 
     fn let_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // let
-        let name = self.expect_ident("tên biến")?;
+        let target = self.let_target()?;
         self.consume(TokenKind::Assign, "mong đợi '=' sau tên biến")?;
         let value = self.expression()?;
         self.expect_semi("let")?;
-        Ok(Stmt::Let { name, value })
+        Ok(Stmt::Let { target, value })
     }
 
     fn func_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // func
         let name = self.expect_ident("tên hàm")?;
-        self.consume(TokenKind::LParen, "mong đợi '(' sau tên hàm")?;
-        let mut params = Vec::new();
-        if !self.check(&TokenKind::RParen) {
-            loop {
-                let param = self.expect_ident("tên tham số")?;
-                if params.contains(&param) {
-                    return Err(self.error(format!("tham số trùng tên '{}'", param)));
-                }
-                params.push(param);
-                if !self.match_or(TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
+        let params = self.param_list()?;
         let body = self.block()?;
         Ok(Stmt::Func { name, params, body })
     }
@@ -133,27 +119,7 @@ impl Parser {
                 {
                     return Err(self.error(format!("tên '{}' trùng trong struct", mname)));
                 }
-                self.consume(
-                    TokenKind::LParen,
-                    "mong đợi '(' sau tên phương thức",
-                )?;
-                let mut params = Vec::new();
-                if !self.check(&TokenKind::RParen) {
-                    loop {
-                        let param = self.expect_ident("tên tham số")?;
-                        if params.contains(&param) {
-                            return Err(self.error(format!("tham số trùng tên '{}'", param)));
-                        }
-                        params.push(param);
-                        if !self.match_or(TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                }
-                self.consume(
-                    TokenKind::RParen,
-                    "mong đợi ')' sau danh sách tham số",
-                )?;
+                let params = self.param_list()?;
                 let body = self.block()?;
                 methods.push(MethodDef {
                     name: mname,
@@ -273,20 +239,41 @@ impl Parser {
 
     fn for_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // for
-        let var = self.expect_ident("tên biến lặp")?;
+        let target = self.let_target()?;
         self.consume(TokenKind::In, "mong đợi 'in' sau biến lặp")?;
         let iterable = self.expression()?;
         let body = self.block()?;
-        Ok(Stmt::For { var, iterable, body })
+        Ok(Stmt::For {
+            target,
+            iterable,
+            body,
+        })
     }
 
     fn return_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // return
-        // `return;` không giá trị = trả về Nil.
+        // `return;` không giá trị = trả về Nil; `return x, y;` = trả tuple.
         let expr = if self.check(&TokenKind::Semi) {
             Expr::Nil
         } else {
-            self.expression()?
+            let first = self.expression()?;
+            if self.match_or(TokenKind::Comma) {
+                let mut items = vec![first];
+                loop {
+                    if self.check(&TokenKind::Semi) {
+                        break;
+                    }
+                    items.push(self.expression()?);
+                    if !self.match_or(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                Expr::Tuple(items)
+            } else if let Expr::Tuple(_) = first {
+                first
+            } else {
+                first
+            }
         };
         self.expect_semi("return")?;
         Ok(Stmt::Return(expr))
@@ -436,9 +423,18 @@ impl Parser {
         loop {
             if self.match_or(TokenKind::LParen) {
                 let mut args = Vec::new();
+                let mut saw_named = false;
                 if !self.check(&TokenKind::RParen) {
                     loop {
-                        args.push(self.expression()?);
+                        let arg = self.call_arg()?;
+                        if arg.name.is_some() {
+                            saw_named = true;
+                        } else if saw_named {
+                            return Err(self.error(
+                                "đối số vị trí không được đứng sau đối số keyword".to_string(),
+                            ));
+                        }
+                        args.push(arg);
                         if !self.match_or(TokenKind::Comma) {
                             break;
                         }
@@ -537,6 +533,22 @@ impl Parser {
         Ok((end, step))
     }
 
+    // Một đối số lúc gọi: `expr` hoặc keyword `tên = expr`. Dùng or() (không ăn
+    // '=') để phân biệt gán trong đối số với keyword arg.
+    fn call_arg(&mut self) -> Result<CallArg, String> {
+        let first = self.or()?;
+        if let Expr::Variable(name) = &first {
+            if self.match_or(TokenKind::Assign) {
+                let value = self.assignment()?;
+                return Ok(CallArg {
+                    name: Some(name.clone()),
+                    value,
+                });
+            }
+        }
+        Ok(CallArg { name: None, value: first })
+    }
+
     fn primary(&mut self) -> Result<Expr, String> {
         let token = self.advance();
         match token.kind {
@@ -553,9 +565,28 @@ impl Parser {
             TokenKind::False => Ok(Expr::Bool(false)),
             TokenKind::Ident(name) => Ok(Expr::Variable(name)),
             TokenKind::LParen => {
-                let expr = self.expression()?;
-                self.consume(TokenKind::RParen, "mong đợi ')' sau biểu thức")?;
-                Ok(expr)
+                let first = self.expression()?;
+                if self.match_or(TokenKind::Comma) {
+                    // Tuple literal: (a, b) / với dấu phẩy cuối (a, b,)
+                    let mut items = vec![first];
+                    loop {
+                        if self.check(&TokenKind::RParen) {
+                            break;
+                        }
+                        items.push(self.expression()?);
+                        if !self.match_or(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.consume(TokenKind::RParen, "mong đợi ')' sau tuple")?;
+                    Ok(Expr::Tuple(items))
+                } else {
+                    self.consume(
+                        TokenKind::RParen,
+                        "mong đợi ')' sau biểu thức",
+                    )?;
+                    Ok(first)
+                }
             }
             TokenKind::Func => {
                 // primary() đã ăn token 'func' — hàm ẩn danh (lambda) trong biểu thức.
@@ -694,21 +725,7 @@ impl Parser {
 
     fn lambda_expr(&mut self) -> Result<Expr, String> {
         // primary() đã ăn token 'func'. Cú pháp: func (params) { body }
-        self.consume(TokenKind::LParen, "mong đợi '(' sau 'func' ẩn danh")?;
-        let mut params = Vec::new();
-        if !self.check(&TokenKind::RParen) {
-            loop {
-                let param = self.expect_ident("tên tham số")?;
-                if params.contains(&param) {
-                    return Err(self.error(format!("tham số trùng tên '{}'", param)));
-                }
-                params.push(param);
-                if !self.match_or(TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
+        let params = self.param_list()?;
         let body = self.block()?;
         Ok(Expr::Lambda { params, body })
     }
@@ -869,6 +886,59 @@ impl Parser {
             &format!("mong đợi ';' sau {}", after_what),
         )
         .map(|_| ())
+    }
+
+    // Parse danh sách tham số `(a, b = 5, c)` — có thể rỗng; ăn luôn dấu ngoặc.
+    fn param_list(&mut self) -> Result<Vec<ParamDef>, String> {
+        self.consume(TokenKind::LParen, "mong đợi '(' sau tên hàm")?;
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                let name = self.expect_ident("tên tham số")?;
+                if params.iter().any(|p: &ParamDef| p.name == name) {
+                    return Err(self.error(format!("tham số trùng tên '{}'", name)));
+                }
+                let default = if self.match_or(TokenKind::Assign) {
+                    Some(self.expression()?)
+                } else {
+                    None
+                };
+                params.push(ParamDef { name, default });
+                if !self.match_or(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
+        Ok(params)
+    }
+
+    // Vế trái của `let`/`for`: biến đơn `x` hoặc pattern `(a, b)`.
+    fn let_target(&mut self) -> Result<LetTarget, String> {
+        if self.check(&TokenKind::LParen) {
+            self.advance(); // (
+            let mut names = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    let n = self.expect_ident("tên biến trong pattern")?;
+                    if names.contains(&n) {
+                        return Err(self.error(format!("biến '{}' lặp lại trong pattern", n)));
+                    }
+                    names.push(n);
+                    if !self.match_or(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(TokenKind::RParen, "mong đợi ')' sau pattern")?;
+            if names.is_empty() {
+                return Err(self.error("pattern rỗng '()' không hợp lệ".to_string()));
+            }
+            Ok(LetTarget::Tuple(names))
+        } else {
+            let name = self.expect_ident("tên biến")?;
+            Ok(LetTarget::Var(name))
+        }
     }
 
     // Parse (expr, expr, ...) cho print/println, ghép nhiều giá trị lại.
@@ -1081,10 +1151,15 @@ mod tests {
     #[test]
     fn for_stmt_parses() {
         let stmts = parse("for i in range(0, 5) { println(i); }");
-        let Stmt::For { var, iterable, body } = unann(&stmts[0]) else {
+        let Stmt::For {
+            target,
+            iterable,
+            body,
+        } = unann(&stmts[0])
+        else {
             panic!("mong đợi For");
         };
-        assert_eq!(var, "i");
+        assert!(matches!(target, LetTarget::Var(name) if name == "i"));
         assert!(matches!(iterable, Expr::Call { .. }));
         assert_eq!(body.len(), 1);
     }

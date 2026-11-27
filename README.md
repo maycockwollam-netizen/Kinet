@@ -223,6 +223,25 @@ thử vế trái trước rồi vế phải), `__eq__` (`==`/`!=`), `__len__` (`
 `__str__` (`str(x)`), `__getitem__` / `__setitem__` (`x[i]`), `__contains__` (`in`).
 `__setitem__` phải **trả về struct mới** (value semantics, giống `map_set`).
 
+### Tuple, hàm trả nhiều giá trị, đối số mặc định & keyword (giống Python)
+```kotlin
+func divmod(a, b) { return a / b, a % b; }        // trả nhiều giá trị
+let (q, r) = divmod(10, 3);                       // bóc tách qua let (q=3, r=1)
+let t = (1, "hai", true);                         // tuple literal
+t[1];        len(t);        2 in t;              // index / len / in
+
+func connect(host, port = 80, timeout = 5) { ... }  // tham số mặc định
+connect("api.x.com");                              // dùng mặc định
+connect("x", timeout = 30);                        // keyword args (đặt theo tên)
+connect(host = "y", port = 443);                   // không cần đúng thứ tự
+
+for (k, v) in [("a", 1), ("b", 2)] { ... }         // bóc tách trong for
+for key in { "x": 1, "y": 2 } { ... }              // duyệt khóa map trực tiếp
+```
+- Default được đánh giá **lúc định nghĩa hàm** (như Python).
+- Giá trị mặc định bị bỏ qua khi truyền; thiếu đối số không có mặc định → lỗi.
+- `Name(tên_field = v)` cũng hoạt động khi tạo instance struct.
+
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:

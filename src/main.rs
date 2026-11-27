@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use ast::{CompClause, Expr, Pattern, Stmt};
+use ast::{CallArg, CompClause, Expr, LetTarget, ParamDef, Pattern, Stmt};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     // Chạy mọi thứ trên thread stack lớn (64MB) để đệ quy sâu trong Kinet
     // không tràn stack trước khi chạm MAX_CALL_DEPTH.
     let spawned = std::thread::Builder::new()
-        .stack_size(128 * 1024 * 1024)
+        .stack_size(256 * 1024 * 1024)
         .spawn(run_all);
     match spawned {
         Ok(handle) => match handle.join() {
@@ -150,9 +150,11 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
     match stmt {
         // Bỏ qua lớp Ann khi in AST — nội dung đã đủ.
         Stmt::Ann { inner, .. } => p_stmt(inner, indent, out),
-        Stmt::Let { name, value } => {
+        Stmt::Let { target, value } => {
             p_indent(out, indent);
-            out.push_str(&format!("let {} = ", name));
+            out.push_str("let ");
+            p_let_target(target, out);
+            out.push_str(" = ");
             p_expr(value, 0, out);
             out.push('\n');
         }
@@ -191,9 +193,15 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             out.push('\n');
             p_stmts(body, indent + 1, out);
         }
-        Stmt::For { var, iterable, body } => {
+        Stmt::For {
+            target,
+            iterable,
+            body,
+        } => {
             p_indent(out, indent);
-            out.push_str(&format!("for {} in ", var));
+            out.push_str("for ");
+            p_let_target(target, out);
+            out.push_str(" in ");
             p_expr(iterable, 0, out);
             out.push('\n');
             p_stmts(body, indent + 1, out);
@@ -241,7 +249,9 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             body,
         } => {
             p_indent(out, indent);
-            out.push_str(&format!("func {}({})\n", name, params.join(", ")));
+            out.push_str(&format!("func {}(", name));
+            p_params(params, out);
+            out.push_str(")\n");
             p_stmts(body, indent + 1, out);
         }
         Stmt::Struct {
@@ -259,7 +269,9 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             }
             for m in methods {
                 p_indent(out, indent + 1);
-                out.push_str(&format!("func {}({})\n", m.name, m.params.join(", ")));
+                out.push_str(&format!("func {}(", m.name));
+                p_params(&m.params, out);
+                out.push_str(")\n");
                 p_stmts(&m.body, indent + 2, out);
             }
         }
@@ -295,6 +307,43 @@ fn p_exprs(exprs: &[Expr], indent: usize, out: &mut String) {
             out.push_str(", ");
         }
         p_expr(e, indent, out);
+    }
+}
+
+fn p_params(params: &[ParamDef], out: &mut String) {
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&p.name);
+        if let Some(def) = &p.default {
+            out.push_str(" = ");
+            p_expr(def, 0, out);
+        }
+    }
+}
+
+fn p_call_args(args: &[CallArg], indent: usize, out: &mut String) {
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        if let Some(n) = &a.name {
+            out.push_str(n);
+            out.push_str(" = ");
+        }
+        p_expr(&a.value, indent, out);
+    }
+}
+
+fn p_let_target(target: &LetTarget, out: &mut String) {
+    match target {
+        LetTarget::Var(name) => out.push_str(name),
+        LetTarget::Tuple(names) => {
+            out.push('(');
+            out.push_str(&names.join(", "));
+            out.push(')');
+        }
     }
 }
 
@@ -340,7 +389,7 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
         Expr::Call { callee, args } => {
             p_expr(callee, indent, out);
             out.push('(');
-            p_exprs(args, indent + 1, out);
+            p_call_args(args, indent + 1, out);
             out.push(')');
         }
         Expr::Index { target, index } => {
@@ -368,6 +417,11 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             p_exprs(items, indent + 1, out);
             out.push(']');
         }
+        Expr::Tuple(items) => {
+            out.push('(');
+            p_exprs(items, indent + 1, out);
+            out.push(')');
+        }
         Expr::Dict(entries) => {
             out.push('{');
             for (i, (k, v)) in entries.iter().enumerate() {
@@ -382,7 +436,7 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
         }
         Expr::Lambda { params, body } => {
             out.push_str("func (");
-            out.push_str(&params.join(", "));
+            p_params(params, out);
             out.push_str(") {\n");
             p_stmts(body, indent + 1, out);
             p_indent(out, indent);

@@ -11,7 +11,7 @@ use std::io::{BufRead, Write};
 
 use indexmap::IndexMap;
 
-use crate::ast::{Expr, Pattern, Stmt};
+use crate::ast::{Expr, LetTarget, ParamDef, Pattern, Stmt};
 use crate::token::TokenKind;
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,8 @@ pub enum Value {
     Str(String),
     Bool(bool),
     List(Vec<Value>),
+    // Tuple bất biến: `(1, 2)` / kết quả `return a, b;`.
+    Tuple(Vec<Value>),
     // Cặp (khóa, giá trị) — IndexMap: giữ thứ tự chèn NHƯNG tra cứu O(1).
     Map(IndexMap<Value, Value>),
     Func(FuncDef),
@@ -66,6 +68,7 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => {
                 // Thứ tự không quan trọng — so theo tập (khóa, giá trị).
                 a.len() == b.len() && a.iter().all(|(k, v)| b.get(k) == Some(v))
@@ -135,6 +138,13 @@ impl Hash for Value {
                     it.hash(state);
                 }
             }
+            Value::Tuple(items) => {
+                11u8.hash(state);
+                items.len().hash(state);
+                for it in items {
+                    it.hash(state);
+                }
+            }
             Value::Map(entries) => {
                 7u8.hash(state);
                 // Băm từng cặp (khóa, giá trị), sắp xếp rồi gộp — độc lập thứ tự.
@@ -156,6 +166,8 @@ impl Hash for Value {
 pub struct FuncDef {
     pub name: String,
     pub params: Vec<String>,
+    // Giá trị mặc định của tham số (đánh giá LÚC định nghĩa hàm, như Python).
+    pub defaults: IndexMap<String, Value>,
     pub body: Vec<Stmt>,
     pub closure: EnvRef,
 }
@@ -373,6 +385,79 @@ impl Interpreter {
     }
 
     /// Đếm một bước thực thi và kiểm tra ngân sách (chống vòng lặp vô hạn).
+    // Dựng FuncDef từ danh sách ParamDef; giá trị mặc định được đánh giá
+    // NGAY lúc định nghĩa hàm (trong closure) như Python.
+    fn make_func(
+        &mut self,
+        name: &str,
+        params: &[ParamDef],
+        body: &[Stmt],
+        closure: EnvRef,
+    ) -> Result<FuncDef, String> {
+        let mut names = Vec::with_capacity(params.len());
+        let mut defaults: IndexMap<String, Value> = IndexMap::new();
+        for p in params {
+            if let Some(def) = &p.default {
+                let v = self.eval(def, closure.clone())?;
+                defaults.insert(p.name.clone(), v);
+            }
+            names.push(p.name.clone());
+        }
+        Ok(FuncDef {
+            name: name.to_string(),
+            params: names,
+            defaults,
+            body: body.to_vec(),
+            closure,
+        })
+    }
+
+    // Định nghĩa biến theo pattern: `x` hoặc bóc tách `(a, b)` từ tuple/list.
+    fn bind_target(&mut self, target: &LetTarget, value: Value, env: &EnvRef) -> Result<(), String> {
+        match target {
+            LetTarget::Var(name) => {
+                env.borrow_mut().define(name, value);
+                Ok(())
+            }
+            LetTarget::Tuple(names) => {
+                let items: Vec<Value> = match value {
+                    Value::Tuple(t) => t,
+                    Value::List(l) => l,
+                    other => {
+                        return Err(format!(
+                            "bóc tách cần tuple hoặc list, gặp {}",
+                            self.to_string(&other)
+                        ));
+                    }
+                };
+                if items.len() != names.len() {
+                    return Err(format!(
+                        "bóc tách cần {} giá trị, nhận {}",
+                        names.len(),
+                        items.len()
+                    ));
+                }
+                for (n, v) in names.iter().zip(items) {
+                    env.borrow_mut().define(n, v);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // Chuyển iterable thành Vec phần tử: list/tuple trực tiếp, map = danh sách khóa.
+    fn iter_values(&self, v: Value) -> Result<Vec<Value>, String> {
+        match v {
+            Value::List(items) => Ok(items),
+            Value::Tuple(items) => Ok(items),
+            Value::Map(entries) => Ok(entries.keys().cloned().collect()),
+            other => Err(format!(
+                "vòng lặp cần list, tuple hoặc map, gặp {}",
+                self.to_string(&other)
+            )),
+        }
+    }
+
     fn tick(&mut self) -> Result<(), String> {
         self.steps += 1;
         if self.steps > self.max_steps {
@@ -399,9 +484,9 @@ impl Interpreter {
                 self.eval(e, env)?;
                 Ok(Flow::Normal)
             }
-            Stmt::Let { name, value } => {
+            Stmt::Let { target, value } => {
                 let v = self.eval(value, env.clone())?;
-                env.borrow_mut().define(name, v);
+                self.bind_target(target, v, &env)?;
                 Ok(Flow::Normal)
             }
             Stmt::Print(exprs) => {
@@ -451,20 +536,19 @@ impl Interpreter {
                 }
                 Ok(Flow::Normal)
             }
-            Stmt::For { var, iterable, body } => {
+            Stmt::For {
+                target,
+                iterable,
+                body,
+            } => {
                 let iter_value = self.eval(iterable, env.clone())?;
-                let Value::List(items) = iter_value else {
-                    return Err(format!(
-                        "'for in' cần list (vd: range(0,5)), gặp {}",
-                        self.to_string(&iter_value)
-                    ));
-                };
+                let items = self.iter_values(iter_value)?;
                 for item in items {
                     // Biến lặp chỉ tồn tại trong body.
                     self.tick()?;
                     let scope =
                         std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
-                    scope.borrow_mut().define(var, item);
+                    self.bind_target(target, item, &scope)?;
                     match self.exec_block(body, scope)? {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         Flow::Break => break,
@@ -558,13 +642,8 @@ impl Interpreter {
                 params,
                 body,
             } => {
-                let func = Value::Func(FuncDef {
-                    name: name.clone(),
-                    params: params.clone(),
-                    body: body.clone(),
-                    closure: env.clone(),
-                });
-                env.borrow_mut().define(name, func);
+                let func = self.make_func(name, params, body, env.clone())?;
+                env.borrow_mut().define(name, Value::Func(func));
                 Ok(Flow::Normal)
             }
             Stmt::Struct {
@@ -581,15 +660,13 @@ impl Interpreter {
                 }
                 let mut method_defs: IndexMap<String, FuncDef> = IndexMap::new();
                 for m in methods {
-                    method_defs.insert(
-                        m.name.clone(),
-                        FuncDef {
-                            name: format!("{}.{}", name, m.name),
-                            params: m.params.clone(),
-                            body: m.body.clone(),
-                            closure: env.clone(),
-                        },
-                    );
+                    let func = self.make_func(
+                        &format!("{}.{}", name, m.name),
+                        &m.params,
+                        &m.body,
+                        env.clone(),
+                    )?;
+                    method_defs.insert(m.name.clone(), func);
                 }
                 let st = StructTypeDef {
                     name: name.clone(),
@@ -630,12 +707,10 @@ impl Interpreter {
                     self.eval(else_expr, env)
                 }
             }
-            Expr::Lambda { params, body } => Ok(Value::Func(FuncDef {
-                name: "<lambda>".to_string(),
-                params: params.clone(),
-                body: body.clone(),
-                closure: env.clone(),
-            })),
+            Expr::Lambda { params, body } => {
+                let f = self.make_func("<lambda>", params, body, env.clone())?;
+                Ok(Value::Func(f))
+            }
             Expr::Template(parts) => {
                 let mut out = String::new();
                 for part in parts {
@@ -669,11 +744,18 @@ impl Interpreter {
             Expr::Binary { left, op, right } => self.eval_binary(left, op, right, env),
             Expr::Call { callee, args } => {
                 let func = self.eval(callee, env.clone())?;
-                let mut arg_values = Vec::with_capacity(args.len());
+                let mut pos = Vec::with_capacity(args.len());
+                let mut named: IndexMap<String, Value> = IndexMap::new();
                 for a in args {
-                    arg_values.push(self.eval(a, env.clone())?);
+                    let v = self.eval(&a.value, env.clone())?;
+                    match &a.name {
+                        Some(n) => {
+                            named.insert(n.clone(), v);
+                        }
+                        None => pos.push(v),
+                    }
                 }
-                self.call(func, arg_values)
+                self.call_full(func, pos, named)
             }
             Expr::Index { target, index } => {
                 let container = self.eval(target, env.clone())?;
@@ -718,6 +800,13 @@ impl Interpreter {
                     out.push(self.eval(it, env.clone())?);
                 }
                 Ok(Value::List(out))
+            }
+            Expr::Tuple(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(self.eval(it, env.clone())?);
+                }
+                Ok(Value::Tuple(out))
             }
             Expr::Dict(entries) => {
                 let mut out: IndexMap<Value, Value> = IndexMap::with_capacity(entries.len());
@@ -964,10 +1053,11 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         }
         let found = match rv {
             Value::List(items) => items.contains(lv),
+            Value::Tuple(items) => items.contains(lv),
             Value::Map(entries) => entries.contains_key(lv),
             _ => {
                 return Err(format!(
-                    "toán tử 'in' cần list, chuỗi hoặc map ở vế phải, gặp {}",
+                    "toán tử 'in' cần list, tuple, chuỗi hoặc map ở vế phải, gặp {}",
                     self.to_string(rv)
                 ));
             }
@@ -1174,6 +1264,10 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 let i = expect_and_normalize_index(idx, items.len())?;
                 Ok(items[i].clone())
             }
+            Value::Tuple(items) => {
+                let i = expect_and_normalize_index(idx, items.len())?;
+                Ok(items[i].clone())
+            }
             Value::Str(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 let i = expect_and_normalize_index(idx, chars.len())?;
@@ -1182,7 +1276,7 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             Value::Map(entries) => entries.get(idx).cloned().ok_or_else(|| {
                 "map không có khóa này".to_string()
             }),
-            _ => Err("chỉ số `[]` chỉ áp dụng cho list, chuỗi hoặc map".to_string()),
+            _ => Err("chỉ số `[]` chỉ áp dụng cho list, tuple, chuỗi hoặc map".to_string()),
         }
     }
 
@@ -1343,6 +1437,7 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         let bound = FuncDef {
             name: def.name.clone(),
             params: def.params.clone(),
+            defaults: def.defaults.clone(),
             body: def.body.clone(),
             closure: env,
         };
@@ -1422,8 +1517,25 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
     }
 
     fn call(&mut self, func: Value, args: Vec<Value>) -> Result<Value, String> {
+        self.call_full(func, args, IndexMap::new())
+    }
+
+    // Gọi hàm với đầy đủ thông tin: đối số vị trí + đối số keyword (tên).
+    fn call_full(
+        &mut self,
+        func: Value,
+        pos: Vec<Value>,
+        named: IndexMap<String, Value>,
+    ) -> Result<Value, String> {
         let def = match func {
             Value::Native(n) => {
+                if !named.is_empty() {
+                    return Err(format!(
+                        "hàm dựng sẵn '{}' không hỗ trợ đối số keyword",
+                        n.name
+                    ));
+                }
+                let args = pos;
                 // map/filter là higher-order: cần self để gọi lại hàm → xử lý riêng.
                 if n.name == "map" {
                     return self.native_map_call(args);
@@ -1453,23 +1565,30 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 return (n.func)(&args);
             }
             Value::StructType(st) => {
-                // Gọi `Tên(args)` → tạo instance: gán đối số cho field theo thứ tự.
-                if args.len() > st.fields.len() {
-                    return Err(format!(
-                        "struct '{}' có {} field, nhận {} đối số",
-                        st.name,
-                        st.fields.len(),
-                        args.len()
-                    ));
-                }
+                // Gọi `Tên(args)` → tạo instance: vị trí khớp field theo thứ tự,
+                // keyword khớp theo tên field.
                 let mut fields: IndexMap<String, Value> = st
                     .fields
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                for (i, arg) in args.into_iter().enumerate() {
+                if pos.len() > st.fields.len() {
+                    return Err(format!(
+                        "struct '{}' có {} field, nhận {} đối số vị trí",
+                        st.name,
+                        st.fields.len(),
+                        pos.len()
+                    ));
+                }
+                for (i, arg) in pos.into_iter().enumerate() {
                     let fname = st.fields[i].0.clone();
                     fields.insert(fname, arg);
+                }
+                for (k, v) in named {
+                    if !fields.contains_key(&k) {
+                        return Err(format!("struct '{}' không có field '{}'", st.name, k));
+                    }
+                    fields.insert(k, v);
                 }
                 return Ok(Value::Struct(StructVal {
                     ty: std::rc::Rc::new(st),
@@ -1485,13 +1604,38 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 MAX_CALL_DEPTH
             ));
         }
-        if def.params.len() != args.len() {
+        // Bind đối số: vị trí → tham số theo thứ tự, keyword → theo tên, còn lại
+        // dùng giá trị mặc định. Thiếu tham số không có mặc định → lỗi.
+        let mut bound: IndexMap<String, Value> = IndexMap::new();
+        if pos.len() > def.params.len() {
             return Err(format!(
-                "Hàm '{}' cần {} đối số, nhận {}",
+                "Hàm '{}' có {} tham số, nhận {} đối số vị trí",
                 def.name,
                 def.params.len(),
-                args.len()
+                pos.len()
             ));
+        }
+        for (i, v) in pos.into_iter().enumerate() {
+            bound.insert(def.params[i].clone(), v);
+        }
+        for (k, v) in named {
+            if !def.params.contains(&k) {
+                return Err(format!("Hàm '{}' không có tham số '{}'", def.name, k));
+            }
+            if bound.contains_key(&k) {
+                return Err(format!("Tham số '{}' được cung cấp hai lần", k));
+            }
+            bound.insert(k, v);
+        }
+        for (name, default) in &def.defaults {
+            if !bound.contains_key(name) {
+                bound.insert(name.clone(), default.clone());
+            }
+        }
+        for p in &def.params {
+            if !bound.contains_key(p) {
+                return Err(format!("Hàm '{}' thiếu đối số '{}'", def.name, p));
+            }
         }
 
         // Môi trường mới có cha là closure của hàm (hỗ trợ biến non-local).
@@ -1499,8 +1643,8 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         // Ghi dòng gọi TRƯỚC khi chạy thân hàm (frame chỉ đúng chỗ gọi).
         let call_site_line = self.current_line;
         let env = std::rc::Rc::new(std::cell::RefCell::new(Env::child(def.closure.clone())));
-        for (param, arg) in def.params.iter().zip(args) {
-            env.borrow_mut().define(param, arg);
+        for (param, arg) in bound {
+            env.borrow_mut().define(&param, arg);
         }
         self.call_depth += 1;
         let result = self.exec_block(&def.body, env);
@@ -1574,6 +1718,14 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                     .join(", ");
                 format!("[{}]", inner)
             }
+            Value::Tuple(items) => {
+                let inner = items
+                    .iter()
+                    .map(|it| self.to_string(it))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({})", inner)
+            }
             Value::Map(entries) => {
                 let inner = entries
                     .iter()
@@ -1621,8 +1773,9 @@ fn native_len(args: &[Value]) -> Result<Value, String> {
     match &args[0] {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::List(items) => Ok(Value::Int(items.len() as i64)),
+        Value::Tuple(items) => Ok(Value::Int(items.len() as i64)),
         Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
-        _ => Err("len() chỉ áp dụng cho chuỗi, list hoặc map".to_string()),
+        _ => Err("len() chỉ áp dụng cho chuỗi, list, tuple hoặc map".to_string()),
     }
 }
 
@@ -1649,6 +1802,7 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
     }
     match &args[0] {
         Value::List(items) => Ok(Value::Bool(items.contains(&args[1]))),
+        Value::Tuple(items) => Ok(Value::Bool(items.contains(&args[1]))),
         Value::Str(s) => {
             let Value::Str(sub) = &args[1] else {
                 return Err("contains() trên chuỗi cần chuỗi con".to_string());
@@ -1656,7 +1810,7 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
             Ok(Value::Bool(s.contains(sub)))
         }
         Value::Map(entries) => Ok(Value::Bool(entries.contains_key(&args[1]))),
-        _ => Err("contains() cần list, chuỗi hoặc map ở đối số đầu".to_string()),
+        _ => Err("contains() cần list, tuple, chuỗi hoặc map ở đối số đầu".to_string()),
     }
 }
 
@@ -2420,6 +2574,7 @@ fn is_truthy_value(v: &Value) -> bool {
         Value::Float(f) => *f != 0.0,
         Value::Str(s) => !s.is_empty(),
         Value::List(items) => !items.is_empty(),
+        Value::Tuple(items) => !items.is_empty(),
         Value::Map(entries) => !entries.is_empty(),
         Value::Struct(s) => !s.fields.is_empty(),
         _ => true,
@@ -2446,6 +2601,10 @@ fn stringify_value(v: &Value) -> String {
         Value::List(items) => {
             let inner: Vec<String> = items.iter().map(stringify_value).collect();
             format!("[{}]", inner.join(", "))
+        }
+        Value::Tuple(items) => {
+            let inner: Vec<String> = items.iter().map(stringify_value).collect();
+            format!("({})", inner.join(", "))
         }
         Value::Map(entries) => {
             let inner: Vec<String> = entries
@@ -2498,7 +2657,7 @@ mod tests {
         F: FnOnce() -> Result<(), String> + Send + 'static,
     {
         let handle = std::thread::Builder::new()
-            .stack_size(128 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(f)
             .expect("spawn thread lớn thất bại");
         handle.join().expect("thread panicked")
@@ -3641,6 +3800,111 @@ mod tests {
     fn struct_magic_len_must_be_int() {
         let src = r#"struct P { x = 0; func __len__() { return "abc"; } } let r = len(P());"#;
         assert!(run(src).is_err());
+    }
+
+    // ----- default arg / keyword / tuple / unpack -----
+
+    #[test]
+    fn multiple_return_and_unpack() {
+        let src = r#"func divmod(a, b) { return a / b, a % b; }
+            let (q, r) = divmod(10, 3);
+            let total = q * 3 + r;"#;
+        assert_eq!(run_and_get(src, "total"), Value::Int(10));
+        assert_eq!(run_and_get(src, "q"), Value::Int(3));
+        assert_eq!(run_and_get(src, "r"), Value::Int(1));
+    }
+
+    #[test]
+    fn tuple_literal_index_len() {
+        assert_eq!(
+            run_and_get(r#"let t = (1, "hai", true); let r = len(t);"#, "r"),
+            Value::Int(3)
+        );
+        assert_eq!(
+            run_and_get(r#"let t = (10, 20, 30); let r = t[1];"#, "r"),
+            Value::Int(20)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = (1, 2, 3)[-1];"#, "r"),
+            Value::Int(3)
+        );
+        // Chỉ số âm + `in` trên tuple
+        assert_eq!(
+            run_and_get(r#"let r = 2 in (1, 2, 3);"#, "r"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn default_args() {
+        let src = r#"func greet(name, prefix = "Hi", punct = "!") { return prefix + " " + name + punct; }
+            let r1 = greet("An");
+            let r2 = greet("An", "Bye");
+            let r3 = greet("An", "Yo", "?");"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Str("Hi An!".into()));
+        assert_eq!(run_and_get(src, "r2"), Value::Str("Bye An!".into()));
+        assert_eq!(run_and_get(src, "r3"), Value::Str("Yo An?".into()));
+    }
+
+    #[test]
+    fn keyword_args() {
+        let src = r#"func f(a, b, c = 0) { return a * 100 + b * 10 + c; }
+            let r1 = f(b = 2, a = 1);
+            let r2 = f(1, c = 3, b = 2);
+            let r3 = f(1, 2, 3);"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(120));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(123));
+        assert_eq!(run_and_get(src, "r3"), Value::Int(123));
+    }
+
+    #[test]
+    fn function_arg_errors() {
+        let e1 = run(r#"func f(a) { return a; } let r = f();"#).unwrap_err();
+        assert!(e1.contains("thiếu đối số"), "{}", e1);
+        let e2 = run(r#"func f(a, b = 5) { return a; } let r = f(1, c = 9);"#).unwrap_err();
+        assert!(e2.contains("không có tham số 'c'"), "{}", e2);
+        let e3 = run(r#"func f(a) { return a; } let r = f(1, 2);"#).unwrap_err();
+        assert!(e3.contains("2"), "{}", e3);
+        // vị trí sau keyword → lỗi cú pháp
+        let tokens = crate::lexer::Lexer::new(r#"func f(a) {} let r = f(a = 1, 2);"#)
+            .tokenize()
+            .unwrap();
+        assert!(Parser::new(tokens).parse().is_err());
+    }
+
+    #[test]
+    fn for_unpacking_and_map_keys() {
+        let src = r#"let out = "";
+            for (i, v) in [(0, "a"), (1, "b")] { out = out + str(i) + v; }
+            let r1 = out;"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Str("0a1b".into()));
+
+        let src2 = r#"let keys = [];
+            for k in { "x": 1, "y": 2 } { keys = append(keys, k); }
+            let r2 = len(keys);"#;
+        assert_eq!(run_and_get(src2, "r2"), Value::Int(2));
+    }
+
+    #[test]
+    fn unpack_from_list_and_tuple() {
+        let src = r#"let (a, b) = [1, 2];
+            let (c, d) = (3, 4);
+            let r = a + b + c + d;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(10));
+    }
+
+    #[test]
+    fn unpack_mismatch_errors() {
+        assert!(run(r#"let (a, b) = (1, 2, 3);"#).is_err());
+        assert!(run(r#"let (a, b) = 42;"#).is_err());
+    }
+
+    #[test]
+    fn struct_keyword_constructor() {
+        let src = r#"struct P { x = 0; y = 0; }
+            let p = P(y = 5, x = 1);
+            let r = p.x * 10 + p.y;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(15));
     }
 
     // ----- float -----
