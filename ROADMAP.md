@@ -26,9 +26,9 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 - [ ] Comments khối `/* ... */`, dòng lệnh `;` không bắt buộc cuối block
 
 ### A2 — Lỗi + stdlib lite  (≈ 3–4 buổi)
-- [ ] **Stack trace** khi script lỗi (dòng nào, hàm nào gọi)
+- [x] **Stack trace** khi script lỗi (hiện chuỗi hàm gọi)
 - [ ] Bộ I/O đầy đủ: append_file, read_lines, list_dir, exists
-- [ ] Helper list/map: map_values, list_join, string uppercase/lowercase/substring
+- [ ] Helper list/map: map_values, string uppercase/lowercase/substring (đã có substring/to_upper/to_lower/list_join)
 - [ ] `def`/gọi với kiểm tra số đối số rõ hơn
 - [ ] Template chuỗi `${x}`
 

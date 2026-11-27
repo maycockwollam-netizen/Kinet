@@ -144,6 +144,7 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
 - [x] **Mốc 4:** Kiểu `map`, file I/O, `chars`/`ord`/`to_int`, đệ quy sâu 2000 — đủ lập trình đa dụng; có `mini_interp.kinet` (viết trình thông dịch bằng Kinet)
 - [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`)
-- [ ] Giai đoạn A (phần 2): template chuỗi, stack trace
+- [x] **Giai đoạn A (phần 2):** stack trace khi lỗi (hiện chuỗi hàm gọi `a → b → c`)
+- [ ] Giai đoạn A (phần 3): template chuỗi `${x}`
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

@@ -123,6 +123,22 @@ pub struct Interpreter {
 //: (xem main.rs) nên con số này thoải mái cho đệ quy hợp lệ.
 const MAX_CALL_DEPTH: usize = 2000;
 
+// Marker đánh dấu lỗi đã có stack trace (tránh bọc trùng khi lỗi dâng lên).
+const STACK_MARKER: &str = "  ↳ tại hàm ";
+// Giới hạn số frame hiển thị để tránh phình khi đệ quy sâu.
+const MAX_STACK_FRAMES: usize = 30;
+
+/// Thêm một frame (tên hàm) vào cuối thông báo lỗi, nếu chưa đủ frame.
+fn annotate_stack(mut err: String, fn_name: &str) -> String {
+    if err.matches(STACK_MARKER).count() >= MAX_STACK_FRAMES {
+        return err;
+    }
+    err.push('\n');
+    err.push_str(STACK_MARKER);
+    err.push_str(fn_name);
+    err
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let globals = std::rc::Rc::new(std::cell::RefCell::new(Env::new()));
@@ -510,6 +526,7 @@ impl Interpreter {
         }
 
         // Môi trường mới có cha là closure của hàm (hỗ trợ biến non-local).
+        let fn_name = def.name.clone();
         let env = std::rc::Rc::new(std::cell::RefCell::new(Env::child(def.closure.clone())));
         for (param, arg) in def.params.iter().zip(args) {
             env.borrow_mut().define(param, arg);
@@ -517,7 +534,8 @@ impl Interpreter {
         self.call_depth += 1;
         let result = self.exec_block(&def.body, env);
         self.call_depth -= 1;
-        let flow = result?;
+        // Khi hàm gặp lỗi, đính kèm tên hàm vào chuỗi lỗi (stack trace).
+        let flow = result.map_err(|e| annotate_stack(e, &fn_name))?;
         match flow {
             Flow::Return(v) => Ok(v),
             Flow::Break | Flow::Continue => Err(format!(
@@ -1141,6 +1159,26 @@ mod tests {
         let run_result = run_on_big_stack(move || Interpreter::new().run(&program(&src)));
         let err = run_result.unwrap_err();
         assert!(err.contains("Độ sâu"));
+    }
+
+    #[test]
+    fn stack_trace_shows_function_names() {
+        let src = "func a() { return b(); } func b() { return c(); } func c() { let x = 1 / 0; } a();";
+        let err = run(src).unwrap_err();
+        assert!(err.contains("Chia cho 0"));
+        assert!(err.contains("tại hàm c"), "thiếu frame c:\n{}", err);
+        assert!(err.contains("tại hàm b"), "thiếu frame b:\n{}", err);
+        assert!(err.contains("tại hàm a"), "thiếu frame a:\n{}", err);
+    }
+
+    #[test]
+    fn stack_trace_capped_on_deep_recursion() {
+        let src = "func r(n) { return r(n + 1); } r(0);".to_string();
+        let outcome = run_on_big_stack(move || Interpreter::new().run(&program(&src)));
+        let err = outcome.unwrap_err();
+        assert!(err.contains("Độ sâu"));
+        // Không được phình ra hàng nghìn frame.
+        assert!(err.matches("tại hàm").count() <= 31, "quá nhiều frame:\n{}", err);
     }
 
     #[test]
