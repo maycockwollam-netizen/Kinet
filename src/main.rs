@@ -422,6 +422,11 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             p_exprs(items, indent + 1, out);
             out.push(')');
         }
+        Expr::Set(items) => {
+            out.push('{');
+            p_exprs(items, indent + 1, out);
+            out.push('}');
+        }
         Expr::Dict(entries) => {
             out.push('{');
             for (i, (k, v)) in entries.iter().enumerate() {

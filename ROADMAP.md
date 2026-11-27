@@ -57,6 +57,7 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 - [x] Phương thức trên kiểu `x.method(args)` (string/list/map/số) — đều THUẦN, desugar sang native (2026-11-27)
 - [x] **Struct + method + magic methods** (`__add__`/`__len__`/`__str__`/`__eq__`/`__getitem__`...): OOP kiểu value, field `p.x`, gán `p.x = v` (2026-11-27)
 - [x] Tuple + unpacking `let (a,b)=...`, trả nhiều giá trị `return a, b`, đối số mặc định + keyword args, `for (k,v) in` / `for k in map` (2026-11-27)
+- [x] Set `{1,2,3}` + helper `enumerate/zip/sorted/reversed/sum/min/max/any/all` + ternary `a if c else b` + `elif` + chain so sánh `1 < x < 10` (2026-11-27)
 - [ ] Enum (sum type) + validate khóa struct
 
 ### B3 — Xử lý lỗi  (≈ 3 buổi)

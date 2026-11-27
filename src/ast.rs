@@ -98,6 +98,8 @@ pub enum Expr {
     List(Vec<Expr>),
     // Tuple bất biến: `(1, 2)` / `return x, y;` trả về tuple.
     Tuple(Vec<Expr>),
+    // Set: `{1, 2, 3}` — các phần tử duy nhất.
+    Set(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Match {
         value: Box<Expr>,

@@ -242,6 +242,25 @@ for key in { "x": 1, "y": 2 } { ... }              // duyệt khóa map trực t
 - Giá trị mặc định bị bỏ qua khi truyền; thiếu đối số không có mặc định → lỗi.
 - `Name(tên_field = v)` cũng hoạt động khi tạo instance struct.
 
+### Set + helper kiểu Python + cú pháp gọn
+```kotlin
+let s = {3, 1, 2};                  // set literal (phần tử duy nhất)
+len(s);   2 in s;   for x in s      // membership / duyệt
+s.add(4);  s.remove(2);  s.union({5, 6});   // method (thuần, trả set mới)
+
+enumerate(["a","b"])       // [(0,"a"),(1,"b")]
+zip([1,2], ["x","y"])      // [(1,"x"),(2,"y")]
+sorted([3,1,2])            // [1,2,3]
+sorted("cba")              // [a,b,c]
+reversed([1,2,3])          // [3,2,1]
+sum/min/max/any/all        // số học / so sánh / logic
+
+// Ternary kiểu Python + chuỗi so sánh + elif
+let grade = "A" if score >= 90 else "B";
+1 < x < 10                          // chain so sánh
+if x > 10 { } elif x > 3 { } else { }
+```
+
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:

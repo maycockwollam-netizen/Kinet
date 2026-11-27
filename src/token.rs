@@ -20,6 +20,7 @@ pub enum TokenKind {
     Struct,
     If,
     Else,
+    Elif,
     While,
     For,
     In,

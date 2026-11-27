@@ -211,17 +211,27 @@ impl Parser {
 
     fn if_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // if
+        self.if_stmt_after_keyword()
+    }
+
+    // Phần còn lại sau keyword `if`/`elif` — dùng chung để xử lý `else if` và `elif`.
+    fn if_stmt_after_keyword(&mut self) -> Result<Stmt, String> {
         let cond = self.expression()?;
         let then_branch = self.block()?;
         let mut else_branch = Vec::new();
         if self.match_or(TokenKind::Else) {
             if self.check(&TokenKind::If) {
                 // else if ... -> gộp lại
-                let nested = self.if_stmt()?;
+                self.advance();
+                let nested = self.if_stmt_after_keyword()?;
                 else_branch.push(nested);
             } else {
                 else_branch = self.block()?;
             }
+        } else if self.match_or(TokenKind::Elif) {
+            // elif điều_kiện ... — tương đương else if
+            let nested = self.if_stmt_after_keyword()?;
+            else_branch.push(nested);
         }
         Ok(Stmt::If {
             cond,
@@ -292,11 +302,36 @@ impl Parser {
     // ---------- Expressions ----------
 
     fn expression(&mut self) -> Result<Expr, String> {
-        self.assignment()
+        self.assignment_with(true)
+    }
+
+    // Cú pháp không hỗ trợ ternary `a if c else b` — dùng cho iterable/bộ lọc
+    // của comprehension (tránh nuốt nhầm `if` của mệnh đề).
+    fn expression_no_ternary(&mut self) -> Result<Expr, String> {
+        self.assignment_with(false)
     }
 
     fn assignment(&mut self) -> Result<Expr, String> {
+        self.assignment_with(true)
+    }
+
+    fn assignment_with(&mut self, allow_ternary: bool) -> Result<Expr, String> {
         let left = self.or()?;
+        // Ternary kiểu Python: `a if cond else b`.
+        if allow_ternary && self.check(&TokenKind::If) {
+            self.advance(); // if
+            let cond = self.or()?;
+            self.consume(
+                TokenKind::Else,
+                "mong đợi 'else' trong biểu thức điều kiện (x if c else y)",
+            )?;
+            let else_expr = self.assignment_with(allow_ternary)?;
+            return Ok(Expr::If {
+                cond: Box::new(cond),
+                then_expr: Box::new(left),
+                else_expr: Box::new(else_expr),
+            });
+        }
         if self.match_or(TokenKind::Assign) {
             let value = self.assignment()?;
             // a = v
@@ -344,49 +379,70 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> Result<Expr, String> {
-        let mut left = self.bitwise()?;
+        // Chained comparison kiểu Python: `1 < x < 10` → (1 < x) and (x < 10).
+        let mut acc = self.bitwise()?;
+        let mut result: Option<Expr> = None;
         loop {
-            // Quy tắc chung: < > <= >= in, và "not in" (được desugar thành
-            // Unary(Not, Binary(In))). Cùng bậc, kết hợp trái như Python.
-            let op = if self.check(&TokenKind::Lt) {
-                Some(TokenKind::Lt)
-            } else if self.check(&TokenKind::Gt) {
-                Some(TokenKind::Gt)
-            } else if self.check(&TokenKind::Le) {
-                Some(TokenKind::Le)
-            } else if self.check(&TokenKind::Ge) {
-                Some(TokenKind::Ge)
-            } else if self.check(&TokenKind::In) {
-                Some(TokenKind::In)
-            } else if self.check(&TokenKind::Not) && self.peek_kind_at(1) == Some(TokenKind::In) {
-                Some(TokenKind::NotIn)
-            } else {
-                None
+            let Some(op) = self.peek_comparison_op() else {
+                break;
             };
-            let Some(op) = op else { break };
-            self.advance(); // toán tử — riêng NotIn ăn thêm 'in'
-            if op == TokenKind::NotIn {
-                self.advance();
-            }
+            self.consume_comparison_op(&op);
             let right = self.bitwise()?;
-            left = if op == TokenKind::NotIn {
+            // So sánh riêng lẻ: `acc op right`.
+            let link = if op == TokenKind::NotIn {
                 Expr::Unary {
                     op: TokenKind::Not,
                     expr: Box::new(Expr::Binary {
-                        left: Box::new(left),
+                        left: Box::new(acc.clone()),
                         op: TokenKind::In,
-                        right: Box::new(right),
+                        right: Box::new(right.clone()),
                     }),
                 }
             } else {
                 Expr::Binary {
-                    left: Box::new(left),
+                    left: Box::new(acc.clone()),
                     op,
-                    right: Box::new(right),
+                    right: Box::new(right.clone()),
                 }
             };
+            result = Some(match result {
+                None => link,
+                Some(prev) => Expr::Binary {
+                    left: Box::new(prev),
+                    op: TokenKind::And,
+                    right: Box::new(link),
+                },
+            });
+            acc = right;
         }
-        Ok(left)
+        Ok(result.unwrap_or(acc))
+    }
+
+    // Trả về toán tử so sánh hiện tại (gồm `not in`), nếu có.
+    fn peek_comparison_op(&self) -> Option<TokenKind> {
+        if self.check(&TokenKind::Lt) {
+            Some(TokenKind::Lt)
+        } else if self.check(&TokenKind::Gt) {
+            Some(TokenKind::Gt)
+        } else if self.check(&TokenKind::Le) {
+            Some(TokenKind::Le)
+        } else if self.check(&TokenKind::Ge) {
+            Some(TokenKind::Ge)
+        } else if self.check(&TokenKind::In) {
+            Some(TokenKind::In)
+        } else if self.check(&TokenKind::Not) && self.peek_kind_at(1) == Some(TokenKind::In) {
+            Some(TokenKind::NotIn)
+        } else {
+            None
+        }
+    }
+
+    // Ăn toán tử so sánh; riêng `not in` ăn cả hai token.
+    fn consume_comparison_op(&mut self, op: &TokenKind) {
+        self.advance();
+        if *op == TokenKind::NotIn {
+            self.advance();
+        }
     }
 
     // << >> & | (cùng bậc, kết hợp trái).
@@ -639,24 +695,41 @@ impl Parser {
     }
 
     fn dict_literal(&mut self) -> Result<Expr, String> {
-        // primary() đã ăn '{' trước khi gọi hàm này.
+        // primary() đã ăn '{'. Phân biệt: `{ "a": 1 }` = dict, `{1, 2, 3}` = set.
         if self.match_or(TokenKind::RBrace) {
             return Ok(Expr::Dict(Vec::new())); // {}
         }
-        let key = self.expression()?;
-        self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
-        let value = self.expression()?;
-        if self.match_or(TokenKind::For) {
-            // Dict comprehension: { key: value for x in iter ... }
-            let clauses = self.comp_clauses()?;
-            self.consume(TokenKind::RBrace, "mong đợi '}' sau dict comprehension")?;
-            return Ok(Expr::DictComp {
-                key: Box::new(key),
-                value: Box::new(value),
-                clauses,
-            });
+        let first = self.expression()?;
+        if self.match_or(TokenKind::Colon) {
+            // Dict literal / comprehension.
+            let value = self.expression()?;
+            if self.match_or(TokenKind::For) {
+                let clauses = self.comp_clauses()?;
+                self.consume(TokenKind::RBrace, "mong đợi '}' sau dict comprehension")?;
+                return Ok(Expr::DictComp {
+                    key: Box::new(first),
+                    value: Box::new(value),
+                    clauses,
+                });
+            }
+            let mut entries = vec![(first, value)];
+            loop {
+                if !self.match_or(TokenKind::Comma) {
+                    break;
+                }
+                if self.check(&TokenKind::RBrace) {
+                    break; // dấu phẩy cuối — cho phép
+                }
+                let k = self.expression()?;
+                self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
+                let v = self.expression()?;
+                entries.push((k, v));
+            }
+            self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
+            return Ok(Expr::Dict(entries));
         }
-        let mut entries = vec![(key, value)];
+        // Set literal: {1, 2, 3} / {x} / {1, 2,}
+        let mut items = vec![first];
         loop {
             if !self.match_or(TokenKind::Comma) {
                 break;
@@ -664,13 +737,10 @@ impl Parser {
             if self.check(&TokenKind::RBrace) {
                 break; // dấu phẩy cuối — cho phép
             }
-            let k = self.expression()?;
-            self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
-            let v = self.expression()?;
-            entries.push((k, v));
+            items.push(self.expression()?);
         }
-        self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
-        Ok(Expr::Dict(entries))
+        self.consume(TokenKind::RBrace, "mong đợi '}' để đóng set")?;
+        Ok(Expr::Set(items))
     }
 
     // Parse các mệnh đề comprehension sau keyword `for` (đã ăn).
@@ -681,10 +751,11 @@ impl Parser {
         loop {
             let var = self.expect_ident("tên biến trong comprehension")?;
             self.consume(TokenKind::In, "mong đợi 'in' trong comprehension")?;
-            let iterable = self.expression()?;
+            // Không cho ternary ở đây để `if` sau iterable là bộ lọc, không phải ternary.
+            let iterable = self.expression_no_ternary()?;
             clauses.push(CompClause::For { var, iterable });
             while self.match_or(TokenKind::If) {
-                let cond = self.expression()?;
+                let cond = self.expression_no_ternary()?;
                 clauses.push(CompClause::If(cond));
             }
             if !self.match_or(TokenKind::For) {
@@ -695,7 +766,7 @@ impl Parser {
     }
 
     fn if_expr_after_if(&mut self) -> Result<Expr, String> {
-        // 'if' đã được ăn. Cú pháp: if cond { giá trị } else { giá trị }
+        // 'if' đã được ăn. Cú pháp: if cond { giá trị } elseif { } else { }
         let cond = self.expression()?;
         let then_expr = self.if_branch()?;
         let mut else_expr = Expr::Nil;
@@ -707,6 +778,8 @@ impl Parser {
             } else {
                 else_expr = self.if_branch()?;
             }
+        } else if self.match_or(TokenKind::Elif) {
+            else_expr = self.if_expr_after_if()?;
         }
         Ok(Expr::If {
             cond: Box::new(cond),

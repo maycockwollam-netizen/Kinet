@@ -23,6 +23,8 @@ pub enum Value {
     List(Vec<Value>),
     // Tuple bất biến: `(1, 2)` / kết quả `return a, b;`.
     Tuple(Vec<Value>),
+    // Set: các phần tử duy nhất, giữ thứ tự chèn, tra cứu O(1).
+    Set(IndexMap<Value, ()>),
     // Cặp (khóa, giá trị) — IndexMap: giữ thứ tự chèn NHƯNG tra cứu O(1).
     Map(IndexMap<Value, Value>),
     Func(FuncDef),
@@ -69,6 +71,9 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => {
+                a.len() == b.len() && a.iter().all(|(k, _)| b.contains_key(k))
+            }
             (Value::Map(a), Value::Map(b)) => {
                 // Thứ tự không quan trọng — so theo tập (khóa, giá trị).
                 a.len() == b.len() && a.iter().all(|(k, v)| b.get(k) == Some(v))
@@ -144,6 +149,18 @@ impl Hash for Value {
                 for it in items {
                     it.hash(state);
                 }
+            }
+            Value::Set(entries) => {
+                12u8.hash(state);
+                // Băm từng phần tử rồi sắp xếp — độc lập thứ tự như set.
+                let mut hs: Vec<u64> = Vec::with_capacity(entries.len());
+                for k in entries.keys() {
+                    let mut h = DefaultHasher::new();
+                    k.hash(&mut h);
+                    hs.push(h.finish());
+                }
+                hs.sort_unstable();
+                hs.hash(state);
             }
             Value::Map(entries) => {
                 7u8.hash(state);
@@ -338,6 +355,18 @@ impl Interpreter {
                 ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
                 ("to_lower", native_to_lower as fn(&[Value]) -> Result<Value, String>),
                 ("list_join", native_list_join as fn(&[Value]) -> Result<Value, String>),
+                ("enumerate", native_enumerate as fn(&[Value]) -> Result<Value, String>),
+                ("zip", native_zip as fn(&[Value]) -> Result<Value, String>),
+                ("sorted", native_sorted as fn(&[Value]) -> Result<Value, String>),
+                ("reversed", native_reversed as fn(&[Value]) -> Result<Value, String>),
+                ("sum", native_sum as fn(&[Value]) -> Result<Value, String>),
+                ("min", native_min as fn(&[Value]) -> Result<Value, String>),
+                ("max", native_max as fn(&[Value]) -> Result<Value, String>),
+                ("any", native_any as fn(&[Value]) -> Result<Value, String>),
+                ("all", native_all as fn(&[Value]) -> Result<Value, String>),
+                ("set_add", native_set_add as fn(&[Value]) -> Result<Value, String>),
+                ("set_remove", native_set_remove as fn(&[Value]) -> Result<Value, String>),
+                ("set_union", native_set_union as fn(&[Value]) -> Result<Value, String>),
                 // map/filter là higher-order: intercept trong Interpreter::call.
                 ("map", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
                 ("filter", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
@@ -450,6 +479,7 @@ impl Interpreter {
         match v {
             Value::List(items) => Ok(items),
             Value::Tuple(items) => Ok(items),
+            Value::Set(entries) => Ok(entries.keys().cloned().collect()),
             Value::Map(entries) => Ok(entries.keys().cloned().collect()),
             other => Err(format!(
                 "vòng lặp cần list, tuple hoặc map, gặp {}",
@@ -808,6 +838,15 @@ impl Interpreter {
                 }
                 Ok(Value::Tuple(out))
             }
+            Expr::Set(items) => {
+                let mut out: IndexMap<Value, ()> = IndexMap::new();
+                for it in items {
+                    let v = self.eval(it, env.clone())?;
+                    check_len("set", out.len() + 1, MAX_LIST_LEN)?;
+                    out.insert(v, ());
+                }
+                Ok(Value::Set(out))
+            }
             Expr::Dict(entries) => {
                 let mut out: IndexMap<Value, Value> = IndexMap::with_capacity(entries.len());
                 for (k, v) in entries {
@@ -1054,6 +1093,7 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         let found = match rv {
             Value::List(items) => items.contains(lv),
             Value::Tuple(items) => items.contains(lv),
+            Value::Set(entries) => entries.contains_key(lv),
             Value::Map(entries) => entries.contains_key(lv),
             _ => {
                 return Err(format!(
@@ -1395,6 +1435,15 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 "len" => "len",
                 _ => return Err(self.method_err(&receiver, name)),
             },
+            Value::Set(_) => match name {
+                "len" => "len",
+                "contains" => "contains",
+                "add" => "set_add",
+                "remove" => "set_remove",
+                "union" => "set_union",
+                "sorted" => "sorted",
+                _ => return Err(self.method_err(&receiver, name)),
+            },
             Value::Int(_) | Value::Float(_) => match name {
                 "abs" => "abs",
                 "round" => "round",
@@ -1726,6 +1775,14 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                     .join(", ");
                 format!("({})", inner)
             }
+            Value::Set(entries) => {
+                let inner = entries
+                    .keys()
+                    .map(|k| self.to_string(k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{}}}", inner)
+            }
             Value::Map(entries) => {
                 let inner = entries
                     .iter()
@@ -1774,8 +1831,9 @@ fn native_len(args: &[Value]) -> Result<Value, String> {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::List(items) => Ok(Value::Int(items.len() as i64)),
         Value::Tuple(items) => Ok(Value::Int(items.len() as i64)),
+        Value::Set(entries) => Ok(Value::Int(entries.len() as i64)),
         Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
-        _ => Err("len() chỉ áp dụng cho chuỗi, list, tuple hoặc map".to_string()),
+        _ => Err("len() chỉ áp dụng cho chuỗi, list, tuple, set hoặc map".to_string()),
     }
 }
 
@@ -1803,6 +1861,7 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
     match &args[0] {
         Value::List(items) => Ok(Value::Bool(items.contains(&args[1]))),
         Value::Tuple(items) => Ok(Value::Bool(items.contains(&args[1]))),
+        Value::Set(entries) => Ok(Value::Bool(entries.contains_key(&args[1]))),
         Value::Str(s) => {
             let Value::Str(sub) = &args[1] else {
                 return Err("contains() trên chuỗi cần chuỗi con".to_string());
@@ -1812,6 +1871,197 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
         Value::Map(entries) => Ok(Value::Bool(entries.contains_key(&args[1]))),
         _ => Err("contains() cần list, tuple, chuỗi hoặc map ở đối số đầu".to_string()),
     }
+}
+
+// ---------- Set + helpers kiểu Python (enumerate/zip/sorted...) ----------
+
+fn seq_values(v: &Value) -> Result<Vec<Value>, String> {
+    match v {
+        Value::List(items) => Ok(items.clone()),
+        Value::Tuple(items) => Ok(items.clone()),
+        Value::Set(entries) => Ok(entries.keys().cloned().collect()),
+        // Chuỗi = danh sách ký tự (như Python).
+        Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+        _ => Err(format!("cần list, tuple, set hoặc chuỗi, gặp {}", stringify_value(v))),
+    }
+}
+
+// So sánh số (int/float) hoặc chuỗi — dùng cho sorted/min/max.
+fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).ok_or_else(|| "NaN không so sánh được".to_string()),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).ok_or_else(|| "NaN không so sánh được".to_string()),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).ok_or_else(|| "NaN không so sánh được".to_string()),
+        (Value::Str(x), Value::Str(y)) => Ok(x.cmp(y)),
+        _ => Err("không so sánh được các giá trị này".to_string()),
+    }
+}
+
+fn native_enumerate(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("enumerate() cần 1 đối số".to_string());
+    }
+    let items = seq_values(&args[0])?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, v) in items.into_iter().enumerate() {
+        check_len("enumerate()", out.len() + 1, MAX_LIST_LEN)?;
+        out.push(Value::Tuple(vec![Value::Int(i as i64), v]));
+    }
+    Ok(Value::List(out))
+}
+
+fn native_zip(args: &[Value]) -> Result<Value, String> {
+    if args.len() < 2 {
+        return Err("zip() cần ít nhất 2 đối số".to_string());
+    }
+    let seqs: Vec<Vec<Value>> = args.iter().map(seq_values).collect::<Result<_, _>>()?;
+    let n = seqs.iter().map(|s| s.len()).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let row: Vec<Value> = seqs.iter().map(|s| s[i].clone()).collect();
+        check_len("zip()", out.len() + 1, MAX_LIST_LEN)?;
+        out.push(Value::Tuple(row));
+    }
+    Ok(Value::List(out))
+}
+
+fn native_sorted(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("sorted() cần 1 đối số".to_string());
+    }
+    let mut items = seq_values(&args[0])?;
+    let mut first_err: Option<String> = None;
+    items.sort_by(|a, b| match value_cmp(a, b) {
+        Ok(o) => o,
+        Err(e) => {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+            std::cmp::Ordering::Equal
+        }
+    });
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(Value::List(items))
+}
+
+fn native_reversed(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("reversed() cần 1 đối số".to_string());
+    }
+    let mut items = seq_values(&args[0])?;
+    items.reverse();
+    Ok(Value::List(items))
+}
+
+fn native_sum(args: &[Value]) -> Result<Value, String> {
+    let items = seq_values(&args[0])?;
+    let mut acc_int: i64 = 0;
+    let mut acc_float: f64 = 0.0;
+    let mut is_float = false;
+    for it in &items {
+        match it {
+            Value::Int(n) => {
+                if is_float {
+                    acc_float += *n as f64;
+                } else {
+                    acc_int = acc_int
+                        .checked_add(*n)
+                        .ok_or_else(|| "sum() tràn số nguyên".to_string())?;
+                }
+            }
+            Value::Float(f) => {
+                if !is_float {
+                    acc_float = acc_int as f64;
+                    is_float = true;
+                }
+                acc_float += f;
+            }
+            other => return Err(format!("sum() cần số, gặp {}", stringify_value(other))),
+        }
+    }
+    if is_float {
+        Ok(Value::Float(acc_float))
+    } else {
+        Ok(Value::Int(acc_int))
+    }
+}
+
+fn native_min(args: &[Value]) -> Result<Value, String> {
+    let items = seq_values(&args[0])?;
+    let mut best = items.first().ok_or_else(|| "min() của chuỗi rỗng".to_string())?;
+    for it in &items[1..] {
+        if value_cmp(it, best)? == std::cmp::Ordering::Less {
+            best = it;
+        }
+    }
+    Ok(best.clone())
+}
+
+fn native_max(args: &[Value]) -> Result<Value, String> {
+    let items = seq_values(&args[0])?;
+    let mut best = items.first().ok_or_else(|| "max() của chuỗi rỗng".to_string())?;
+    for it in &items[1..] {
+        if value_cmp(it, best)? == std::cmp::Ordering::Greater {
+            best = it;
+        }
+    }
+    Ok(best.clone())
+}
+
+fn native_any(args: &[Value]) -> Result<Value, String> {
+    let items = seq_values(&args[0])?;
+    Ok(Value::Bool(items.iter().any(is_truthy_value)))
+}
+
+fn native_all(args: &[Value]) -> Result<Value, String> {
+    let items = seq_values(&args[0])?;
+    Ok(Value::Bool(items.iter().all(is_truthy_value)))
+}
+
+fn native_set_add(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("set_add() cần 2 đối số (set, x)".to_string());
+    }
+    let Value::Set(entries) = &args[0] else {
+        return Err("set_add() cần set ở đối số đầu".to_string());
+    };
+    let mut out = entries.clone();
+    check_len("set", out.len() + 1, MAX_LIST_LEN)?;
+    out.insert(args[1].clone(), ());
+    Ok(Value::Set(out))
+}
+
+fn native_set_remove(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("set_remove() cần 2 đối số (set, x)".to_string());
+    }
+    let Value::Set(entries) = &args[0] else {
+        return Err("set_remove() cần set ở đối số đầu".to_string());
+    };
+    let mut out = entries.clone();
+    out.shift_remove(&args[1]);
+    Ok(Value::Set(out))
+}
+
+fn native_set_union(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("set_union() cần 2 đối số (set, set)".to_string());
+    }
+    let Value::Set(a) = &args[0] else {
+        return Err("set_union() cần set ở đối số đầu".to_string());
+    };
+    let Value::Set(b) = &args[1] else {
+        return Err("set_union() cần set ở đối số thứ 2".to_string());
+    };
+    let mut out = a.clone();
+    for k in b.keys() {
+        check_len("set", out.len() + 1, MAX_LIST_LEN)?;
+        out.insert(k.clone(), ());
+    }
+    Ok(Value::Set(out))
 }
 
 fn native_map_set(args: &[Value]) -> Result<Value, String> {
@@ -2575,6 +2825,7 @@ fn is_truthy_value(v: &Value) -> bool {
         Value::Str(s) => !s.is_empty(),
         Value::List(items) => !items.is_empty(),
         Value::Tuple(items) => !items.is_empty(),
+        Value::Set(entries) => !entries.is_empty(),
         Value::Map(entries) => !entries.is_empty(),
         Value::Struct(s) => !s.fields.is_empty(),
         _ => true,
@@ -2605,6 +2856,10 @@ fn stringify_value(v: &Value) -> String {
         Value::Tuple(items) => {
             let inner: Vec<String> = items.iter().map(stringify_value).collect();
             format!("({})", inner.join(", "))
+        }
+        Value::Set(entries) => {
+            let inner: Vec<String> = entries.keys().map(stringify_value).collect();
+            format!("{{{}}}", inner.join(", "))
         }
         Value::Map(entries) => {
             let inner: Vec<String> = entries
@@ -3905,6 +4160,141 @@ mod tests {
             let p = P(y = 5, x = 1);
             let r = p.x * 10 + p.y;"#;
         assert_eq!(run_and_get(src, "r"), Value::Int(15));
+    }
+
+    // ----- set & python helpers -----
+
+    #[test]
+    fn set_literal_membership_len() {
+        assert_eq!(
+            run_and_get(r#"let r = len({1, 2, 3});"#, "r"),
+            Value::Int(3)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = 2 in {1, 2, 3};"#, "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = 9 in {1, 2, 3};"#, "r"),
+            Value::Bool(false)
+        );
+        // Trùng phần tử -> gom lại một
+        let src = r#"let s = {1, 2, 2, 3}; let r = len(s);"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(3));
+        // Set so bằng (không phụ thuộc thứ tự)
+        assert_eq!(
+            run_and_get(r#"let r = {1, 2, 3} == {3, 2, 1};"#, "r"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn set_methods_are_pure() {
+        let src = r#"let s = {1, 2, 3};
+            let s2 = s.add(4).remove(2).union({5, 6});
+            let r1 = len(s2);
+            let r2 = 2 in s;
+            let r3 = 5 in s2;"#;
+        // {1,2,3}+4 = {1,2,3,4}; -2 = {1,3,4}; +{5,6} = {1,3,4,5,6}
+        assert_eq!(run_and_get(src, "r1"), Value::Int(5));
+        assert_eq!(run_and_get(src, "r2"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r3"), Value::Bool(true));
+    }
+
+    #[test]
+    fn enumerate_zip_sorted_etc() {
+        let src = r#"let e = enumerate(["a", "b"]);
+            let r1 = e[0];
+            let z = zip([1, 2, 3], ["x", "y"]);
+            let r2 = len(z);
+            let r3 = sorted([3, 1, 2]);
+            let r4 = sorted("cba");
+            let r5 = reversed([1, 2, 3]);
+            let r6 = sum([1, 2, 3]);
+            let r7 = min([3, 1, 2]);
+            let r8 = max([3, 1, 2]);
+            let r9 = any([0, 0, 1]);
+            let r10 = all([1, 2, 3]);"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Tuple(vec![Value::Int(0), Value::Str("a".into())]));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(2));
+        assert_eq!(
+            run_and_get(src, "r3"),
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+        assert_eq!(
+            run_and_get(src, "r4"),
+            Value::List(vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())])
+        );
+        assert_eq!(
+            run_and_get(src, "r5"),
+            Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)])
+        );
+        assert_eq!(run_and_get(src, "r6"), Value::Int(6));
+        assert_eq!(run_and_get(src, "r7"), Value::Int(1));
+        assert_eq!(run_and_get(src, "r8"), Value::Int(3));
+        assert_eq!(run_and_get(src, "r9"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r10"), Value::Bool(true));
+    }
+
+    #[test]
+    fn for_over_set() {
+        let src = r#"let out = [];
+            for x in {1, 2, 3} { out = append(out, x); }
+            let r = len(out);"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(3));
+    }
+
+    // ----- ternary / elif / chained comparison -----
+
+    #[test]
+    fn ternary_expression() {
+        assert_eq!(
+            run_and_get(r#"let r = 10 if 1 < 2 else 20;"#, "r"),
+            Value::Int(10)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = 10 if 1 > 2 else 20;"#, "r"),
+            Value::Int(20)
+        );
+        // Lồng nhau (right-assoc)
+        let src = r#"let score = 85;
+            let grade = "A" if score >= 90 else "B" if score >= 80 else "C";
+            let r = grade;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str("B".into()));
+        // Trong comprehension element
+        let src2 = r#"let r = [y if y % 2 == 0 else -y for y in [1, 2, 3, 4]];"#;
+        assert_eq!(
+            run_and_get(src2, "r"),
+            Value::List(vec![
+                Value::Int(-1),
+                Value::Int(2),
+                Value::Int(-3),
+                Value::Int(4)
+            ])
+        );
+    }
+
+    #[test]
+    fn chained_comparison() {
+        assert_eq!(run_and_get(r#"let r = 1 < 2 < 3;"#, "r"), Value::Bool(true));
+        assert_eq!(run_and_get(r#"let r = 3 < 2 < 1;"#, "r"), Value::Bool(false));
+        assert_eq!(run_and_get(r#"let x = 5; let r = 1 < x < 10;"#, "r"), Value::Bool(true));
+        assert_eq!(run_and_get(r#"let x = 20; let r = 1 < x < 10;"#, "r"), Value::Bool(false));
+        // 3 nhịp
+        assert_eq!(run_and_get(r#"let r = 1 < 2 < 3 < 4;"#, "r"), Value::Bool(true));
+    }
+
+    #[test]
+    fn elif_statement_and_expression() {
+        let src = r#"let x = 5; let label = "";
+            if x > 10 { label = "lon"; } elif x > 3 { label = "vua"; } else { label = "be"; }
+            let r = label;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str("vua".into()));
+
+        let src2 = r#"let x = 2;
+            let v = if x > 10 { "A" } elif x > 1 { "B" } else { "C" };
+            let r = v;"#;
+        assert_eq!(run_and_get(src2, "r"), Value::Str("B".into()));
     }
 
     // ----- float -----
