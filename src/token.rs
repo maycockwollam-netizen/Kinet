@@ -20,6 +20,7 @@ pub enum TokenKind {
     Return,
     Break,
     Continue,
+    Import,
     Print,
     Println,
     Match,

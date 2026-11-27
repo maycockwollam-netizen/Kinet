@@ -130,6 +130,29 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - **Scope nhất quán**: `if`/`while`/`for`/`match` đều tạo scope riêng — `let` trong block không rò ra ngoài; còn gán `=` vào biến ngoài thì vẫn được.
 - **`return;`** (không giá trị) trả về `nil`.
 
+## Template chuỗi, Lambda, Import
+
+**Template chuỗi `${...}`** — chèn biểu thức vào chuỗi:
+```c
+let msg = "Xin chào ${name}, có ${len(tasks)} việc!";
+```
+
+**Lambda (hàm ẩn danh)** — dùng làm giá trị, truyền cho hàm khác:
+```c
+let d = func(x) { return x * 2; };
+map([1, 2, 3], func(x) { return x * x; });   // → [1, 4, 9]
+filter([1, 2, 3, 4], func(x) { return x % 2 == 0; });  // → [2, 4]
+```
+
+**Import** — chia code thành nhiều file:
+```c
+import "examples/strings_lib.kinet";
+println(double(21));   // hàm từ file import dùng được ngay
+```
+Đường dẫn tương đối với thư mục hiện hành; import cùng file 2 lần chỉ chạy 1 lần.
+
+Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
+
 ## Cấu trúc code
 
 | Module | Vai trò |
@@ -153,5 +176,5 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`)
 - [x] **Giai đoạn A (phần 2):** stack trace khi lỗi (hiện chuỗi hàm gọi `a → b → c`)
 - [x] **Bảo mật & độ chắc:** ngân sách thực thi (chống `while true`), cap `range()`, `return;`, scope nhất quán, sandbox file I/O qua `KINET_SANDBOX_ROOT`, sửa overflow `range`/`substring`, `list_join` đúng chuỗi
-- [ ] Giai đoạn A (phần 3): template chuỗi `${x}`
+- [x] **Template chuỗi `${x}` + Lambda + Import** (Giai đoạn A xong; mở Phase B)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn

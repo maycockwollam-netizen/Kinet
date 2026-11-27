@@ -48,12 +48,12 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 ## 🟡 GIAI ĐOẠN B — "Ngôn ngữ đứng vững" (đủ làm phần mềm cỡ vừa)
 
 ### B1 — Module / import  (≈ 3–4 buổi)
-- [ ] Chia code thành nhiều file, `import "file.kinet"`, namespace
-- [ ] Thư mục stdlib riêng
+- [x] `import "file.kinet"` cơ bản (chạy trong cùng global env, tránh import lặp qua set)
+- [x] Lambda + map/filter (mở Phase B)
+- [ ] Namespace / thư mục stdlib riêng
 
 ### B2 — Kiểu + ngữ nghĩa  (≈ 4–5 buổi)
 - [ ] `float`, ký tự riêng, `null` rõ ràng
-- [ ] Hàm ẩn danh / closure dạng biểu thức (lambda) → map/filter
 - [ ] Tuple / struct nhẹ (map có khoá cố định + validate)
 
 ### B3 — Xử lý lỗi  (≈ 3 buổi)

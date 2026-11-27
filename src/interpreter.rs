@@ -5,7 +5,7 @@
 //!   Env    = phạm vi biến, có nối tới cha (cho closure/block)
 //!   Flow   = tín hiệu điều khiển (return) trong khi chạy
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use crate::ast::{Expr, Pattern, Stmt};
@@ -121,6 +121,8 @@ pub struct Interpreter {
     // Ngân sách thực thi: đếm mỗi câu lệnh đã chạy, chống vòng lặp vô hạn.
     steps: u64,
     max_steps: u64,
+    // Các file đã import (đường dẫn đã chuẩn hóa) — tránh import lặp/vòng.
+    imported: HashSet<std::path::PathBuf>,
 }
 
 //: Giới hạn độ sâu gọi hàm tránh stack overflow. Main chạy trên thread 64MB
@@ -164,7 +166,6 @@ impl Interpreter {
                 ("ends_with", native_ends_with as fn(&[Value]) -> Result<Value, String>),
                 ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
                 ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
-                ("map", native_map as fn(&[Value]) -> Result<Value, String>),
                 ("map_set", native_map_set as fn(&[Value]) -> Result<Value, String>),
                 ("map_keys", native_map_keys as fn(&[Value]) -> Result<Value, String>),
                 ("map_remove", native_map_remove as fn(&[Value]) -> Result<Value, String>),
@@ -177,6 +178,9 @@ impl Interpreter {
                 ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
                 ("to_lower", native_to_lower as fn(&[Value]) -> Result<Value, String>),
                 ("list_join", native_list_join as fn(&[Value]) -> Result<Value, String>),
+                // map/filter là higher-order: intercept trong Interpreter::call.
+                ("map", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
+                ("filter", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
             ] {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
@@ -186,6 +190,7 @@ impl Interpreter {
             call_depth: 0,
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
+            imported: HashSet::new(),
         }
     }
 
@@ -313,6 +318,27 @@ impl Interpreter {
             }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
+            Stmt::Import(path) => {
+                // Chạy code file import ngay trong cùng global env (function/let
+                // dùng được sau `import`). Tránh import lặp qua set đã chuẩn hóa.
+                let resolved = sandboxed_path(path)?;
+                let canon = resolved.canonicalize().unwrap_or(resolved.clone());
+                if self.imported.contains(&canon) {
+                    return Ok(Flow::Normal);
+                }
+                self.imported.insert(canon.clone());
+                let src = std::fs::read_to_string(&canon)
+                    .map_err(|e| format!("import('{}') thất bại: {}", path, e))?;
+                let tokens = crate::lexer::Lexer::new(&src).tokenize()?;
+                let stmts = crate::parser::Parser::new(tokens).parse()?;
+                match self.exec_block(&stmts, self.globals.clone())? {
+                    Flow::Normal => Ok(Flow::Normal),
+                    _ => Err(format!(
+                        "import('{}'): file được import không được có return/break ở top-level",
+                        path
+                    )),
+                }
+            }
             Stmt::Func {
                 name,
                 params,
@@ -340,6 +366,20 @@ impl Interpreter {
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
+            Expr::Lambda { params, body } => Ok(Value::Func(FuncDef {
+                name: "<lambda>".to_string(),
+                params: params.clone(),
+                body: body.clone(),
+                closure: env.clone(),
+            })),
+            Expr::Template(parts) => {
+                let mut out = String::new();
+                for part in parts {
+                    let v = self.eval(part, env.clone())?;
+                    out.push_str(&self.to_string(&v));
+                }
+                Ok(Value::Str(out))
+            }
             Expr::Variable(name) => env.borrow().get(name),
             Expr::Assign { name, value } => {
                 let v = self.eval(value, env.clone())?;
@@ -542,7 +582,16 @@ impl Interpreter {
 
     fn call(&mut self, func: Value, args: Vec<Value>) -> Result<Value, String> {
         let def = match func {
-            Value::Native(n) => return (n.func)(&args),
+            Value::Native(n) => {
+                // map/filter là higher-order: cần self để gọi lại hàm → xử lý riêng.
+                if n.name == "map" {
+                    return self.native_map_call(args);
+                }
+                if n.name == "filter" {
+                    return self.native_filter_call(args);
+                }
+                return (n.func)(&args);
+            }
             Value::Func(def) => def,
             _ => return Err("Chỉ gọi được hàm, giá trị này không phải hàm".to_string()),
         };
@@ -580,6 +629,41 @@ impl Interpreter {
             )),
             Flow::Normal => Ok(Value::Nil),
         }
+    }
+
+    /// map(list, hàm) — áp hàm lên từng phần tử, trả list kết quả.
+    fn native_map_call(&mut self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("map() cần 2 đối số (list, hàm)".to_string());
+        }
+        let Value::List(items) = &args[0] else {
+            return Err("map() cần list ở đối số đầu".to_string());
+        };
+        let f = args[1].clone();
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(self.call(f.clone(), vec![item.clone()])?);
+        }
+        Ok(Value::List(out))
+    }
+
+    /// filter(list, hàm) — giữ các phần tử mà hàm trả về "đúng".
+    fn native_filter_call(&mut self, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != 2 {
+            return Err("filter() cần 2 đối số (list, hàm)".to_string());
+        }
+        let Value::List(items) = &args[0] else {
+            return Err("filter() cần list ở đối số đầu".to_string());
+        };
+        let f = args[1].clone();
+        let mut out = Vec::new();
+        for item in items {
+            let result = self.call(f.clone(), vec![item.clone()])?;
+            if self.truthy(&result) {
+                out.push(item.clone());
+            }
+        }
+        Ok(Value::List(out))
     }
 
     // Chuẩn Python: 0, chuỗi rỗng, list rỗng là falsy — quan trọng cho agent
@@ -634,6 +718,10 @@ impl Interpreter {
 }
 
 // ---------- Hàm native (builtin) ----------
+
+fn native_higher_order_stub(_args: &[Value]) -> Result<Value, String> {
+    Err("map/filter là builtin cần interpreter, không gọi trực tiếp".to_string())
+}
 
 fn native_len(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
@@ -693,26 +781,6 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
         Value::Map(entries) => Ok(Value::Bool(map_index(entries, &args[1]).is_some())),
         _ => Err("contains() cần list, chuỗi hoặc map ở đối số đầu".to_string()),
     }
-}
-
-fn native_map(args: &[Value]) -> Result<Value, String> {
-    if args.len() % 2 != 0 {
-        return Err("map() cần số chẵn đối số (khóa, giá trị, khóa, giá trị, ...)".to_string());
-    }
-    let mut entries: Vec<(Value, Value)> = Vec::with_capacity(args.len() / 2);
-    let mut i = 0;
-    while i < args.len() {
-        let key = args[i].clone();
-        let value = args[i + 1].clone();
-        // Khóa trùng thì ghi đè thay vì thêm bản thứ hai.
-        if let Some(idx) = map_index(&entries, &key) {
-            entries[idx].1 = value;
-        } else {
-            entries.push((key, value));
-        }
-        i += 2;
-    }
-    Ok(Value::Map(entries))
 }
 
 fn native_map_set(args: &[Value]) -> Result<Value, String> {
@@ -1323,7 +1391,7 @@ mod tests {
 
     #[test]
     fn map_operations() {
-        let src = r#"let m = map("a", 1, "b", 2);
+        let src = r#"let m = { "a": 1, "b": 2 };
             let v = get(m, "a");
             let has = contains(m, "b");
             let not_has = contains(m, "z");
@@ -1347,20 +1415,20 @@ mod tests {
 
     #[test]
     fn map_nested() {
-        let src = r#"let inner = map("x", 10); let outer = map("p", inner); let v = get(get(outer, "p"), "x");"#;
+        let src = r#"let inner = { "x": 10 }; let outer = { "p": inner }; let v = get(get(outer, "p"), "x");"#;
         assert_eq!(run_and_get(src, "v"), Value::Int(10));
     }
 
     #[test]
     fn map_missing_key_errors() {
-        let err = run(r#"let m = map("a", 1); let v = get(m, "zz");"#).unwrap_err();
+        let err = run(r#"let m = { "a": 1 }; let v = get(m, "zz");"#).unwrap_err();
         assert!(err.contains("khóa"));
     }
 
     #[test]
     fn map_dup_key_overwrites() {
         assert_eq!(
-            run_and_get(r#"let m = map("a", 1, "a", 2);"#, "m"),
+            run_and_get(r#"let m = { "a": 1, "a": 2 };"#, "m"),
             Value::Map(vec![(Value::Str("a".into()), Value::Int(2))])
         );
     }
@@ -1505,6 +1573,87 @@ mod tests {
     fn bare_return_returns_nil() {
         let src = "func f() { return; } let v = f();";
         assert_eq!(run_and_get(src, "v"), Value::Nil);
+    }
+
+    // ----- Template / Lambda / Import / higher-order -----
+
+    #[test]
+    fn template_interpolates_expressions() {
+        let src = r#"let name = "An"; let s = "Xin chào ${name}, có ${1 + 2} việc";"#;
+        assert_eq!(
+            run_and_get(src, "s"),
+            Value::Str("Xin chào An, có 3 việc".into())
+        );
+    }
+
+    #[test]
+    fn template_with_nested_call() {
+        let src = r#"let s = "len=${len(\"abc\")}";"#;
+        assert_eq!(run_and_get(src, "s"), Value::Str("len=3".into()));
+    }
+
+    #[test]
+    fn template_unclosed_errors() {
+        // Lỗi này xảy ra ở giai đoạn parse (tách ${...}), phải parse trực tiếp.
+        let tokens = Lexer::new(r#"let s = "chưa đóng ${name";"#).tokenize().unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.contains("chưa đóng"));
+    }
+
+    #[test]
+    fn lambda_is_assignable_and_callable() {
+        let src = "let d = func(x) { return x * 2; }; let v = d(21);";
+        assert_eq!(run_and_get(src, "v"), Value::Int(42));
+    }
+
+    #[test]
+    fn higher_order_apply_via_user_func() {
+        let src = "func apply(f, x) { return f(x); } let v = apply(func(n) { return n + 1; }, 41);";
+        assert_eq!(run_and_get(src, "v"), Value::Int(42));
+    }
+
+    #[test]
+    fn native_map_with_lambda() {
+        assert_eq!(
+            run_and_get(
+                "let r = map([1, 2, 3], func(x) { return x * x; });",
+                "r"
+            ),
+            Value::List(vec![Value::Int(1), Value::Int(4), Value::Int(9)])
+        );
+    }
+
+    #[test]
+    fn native_filter_with_lambda() {
+        assert_eq!(
+            run_and_get(
+                "let r = filter([1, 2, 3, 4], func(x) { return x % 2 == 0; });",
+                "r"
+            ),
+            Value::List(vec![Value::Int(2), Value::Int(4)])
+        );
+    }
+
+    #[test]
+    fn import_runs_library_file() {
+        let lib = std::env::temp_dir().join("kinet_import_lib.kinet");
+        std::fs::write(&lib, "func double(x) { return x * 2; }\n").unwrap();
+        let src = format!("import \"{}\"; let v = double(21);", lib.display());
+        assert_eq!(run_and_get(&src, "v"), Value::Int(42));
+        let _ = std::fs::remove_file(&lib);
+    }
+
+    #[test]
+    fn import_is_idempotent() {
+        let lib = std::env::temp_dir().join("kinet_import_lib2.kinet");
+        std::fs::write(&lib, "let X = 7;    // chỉ đọc 1 lần\n").unwrap();
+        let src = format!(
+            "import \"{}\"; import \"{}\"; let v = X;",
+            lib.display(),
+            lib.display()
+        );
+        assert_eq!(run_and_get(&src, "v"), Value::Int(7));
+        let _ = std::fs::remove_file(&lib);
     }
 
     #[test]

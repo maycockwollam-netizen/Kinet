@@ -11,6 +11,7 @@
 //!   primary / call
 
 use crate::ast::{Expr, MatchArm, Pattern, Stmt};
+use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
 
 pub struct Parser {
@@ -42,6 +43,7 @@ impl Parser {
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
+            TokenKind::Import => self.import_stmt(),
             TokenKind::Break => {
                 self.advance();
                 self.expect_semi("break")?;
@@ -101,6 +103,22 @@ impl Parser {
         self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
         let body = self.block()?;
         Ok(Stmt::Func { name, params, body })
+    }
+
+    fn import_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // import
+        let token = self.advance();
+        let path = match token.kind {
+            TokenKind::Str(s) => s,
+            other => {
+                return Err(self.error_at(
+                    token.line,
+                    format!("mong đợi chuỗi đường dẫn sau import, gặp {:?}", other),
+                ))
+            }
+        };
+        self.expect_semi("import")?;
+        Ok(Stmt::Import(path))
     }
 
     fn if_stmt(&mut self) -> Result<Stmt, String> {
@@ -252,7 +270,13 @@ impl Parser {
         let token = self.advance();
         match token.kind {
             TokenKind::Number(n) => Ok(Expr::Number(n)),
-            TokenKind::Str(s) => Ok(Expr::Str(s)),
+            TokenKind::Str(s) => {
+                if s.contains("${") {
+                    self.template_expr(&s)
+                } else {
+                    Ok(Expr::Str(s))
+                }
+            }
             TokenKind::True => Ok(Expr::Bool(true)),
             TokenKind::False => Ok(Expr::Bool(false)),
             TokenKind::Ident(name) => Ok(Expr::Variable(name)),
@@ -260,6 +284,10 @@ impl Parser {
                 let expr = self.expression()?;
                 self.consume(TokenKind::RParen, "mong đợi ')' sau biểu thức")?;
                 Ok(expr)
+            }
+            TokenKind::Func => {
+                // primary() đã ăn token 'func' — hàm ẩn danh (lambda) trong biểu thức.
+                self.lambda_expr()
             }
             TokenKind::Match => self.match_expr(),
             TokenKind::LBracket => {
@@ -301,6 +329,50 @@ impl Parser {
         }
         self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
         Ok(Expr::Dict(entries))
+    }
+
+    fn lambda_expr(&mut self) -> Result<Expr, String> {
+        // primary() đã ăn token 'func'. Cú pháp: func (params) { body }
+        self.consume(TokenKind::LParen, "mong đợi '(' sau 'func' ẩn danh")?;
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                let param = self.expect_ident("tên tham số")?;
+                if params.contains(&param) {
+                    return Err(self.error(format!("tham số trùng tên '{}'", param)));
+                }
+                params.push(param);
+                if !self.match_or(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
+        let body = self.block()?;
+        Ok(Expr::Lambda { params, body })
+    }
+
+    fn template_expr(&mut self, contents: &str) -> Result<Expr, String> {
+        let parts = split_template(contents)?;
+        let mut exprs = Vec::with_capacity(parts.len());
+        for (is_expr, text) in parts {
+            if is_expr {
+                // Phần ${...} là một biểu thức Kinet — lex + parse lại.
+                let tokens = Lexer::new(&text).tokenize()?;
+                let mut sub = Parser::new(tokens);
+                let e = sub.expression()?;
+                if !sub.at_end() {
+                    return Err(format!(
+                        "Template: sau khi parse '{}' còn dư token",
+                        text
+                    ));
+                }
+                exprs.push(e);
+            } else {
+                exprs.push(Expr::Str(text));
+            }
+        }
+        Ok(Expr::Template(exprs))
     }
 
     fn match_expr(&mut self) -> Result<Expr, String> {
@@ -462,6 +534,77 @@ impl Parser {
     fn error_at(&self, line: usize, msg: String) -> String {
         format!("Lỗi cú pháp dòng {}: {}", line, msg)
     }
+}
+
+/// Tách một chuỗi template thành các phần: `false` = chuỗi thường,
+/// `true` = nội dung biểu thức giữa `${...}`. Theo dõi `{}` lồng nhau và
+/// chuỗi con `"..."` để tìm đúng dấu đóng `}`.
+fn split_template(contents: &str) -> Result<Vec<(bool, String)>, String> {
+    let chars: Vec<char> = contents.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut parts: Vec<(bool, String)> = Vec::new();
+    let mut literal = String::new();
+
+    while i < n {
+        if chars[i] == '$' && i + 1 < n && chars[i + 1] == '{' {
+            if !literal.is_empty() {
+                parts.push((false, std::mem::take(&mut literal)));
+            }
+            i += 2;
+            let mut depth = 1usize;
+            let mut expr = String::new();
+            let mut in_str = false;
+            while i < n {
+                let c = chars[i];
+                if in_str {
+                    expr.push(c);
+                    if c == '\\' && i + 1 < n {
+                        expr.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    if c == '"' {
+                        in_str = false;
+                    }
+                    i += 1;
+                    continue;
+                }
+                match c {
+                    '"' => {
+                        in_str = true;
+                        expr.push(c);
+                    }
+                    '{' => {
+                        depth += 1;
+                        expr.push(c);
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        expr.push(c);
+                    }
+                    _ => expr.push(c),
+                }
+                i += 1;
+            }
+            if depth != 0 {
+                return Err("Template: chuỗi chưa đóng '}' khi dùng ${".to_string());
+            }
+            i += 1; // vượt qua '}'
+            parts.push((true, expr));
+        } else {
+            literal.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if !literal.is_empty() || parts.is_empty() {
+        parts.push((false, literal));
+    }
+    Ok(parts)
 }
 
 #[cfg(test)]

@@ -42,6 +42,12 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    Lambda {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    // Template chuỗi: danh sách phần (Str literal + biểu thức interpolated).
+    Template(Vec<Expr>),
     List(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Match {
@@ -75,6 +81,7 @@ pub enum Stmt {
     },
     Break,
     Continue,
+    Import(String),
     Func {
         name: String,
         params: Vec<String>,

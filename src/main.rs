@@ -200,6 +200,10 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             p_indent(out, indent);
             out.push_str("break\n");
         }
+        Stmt::Import(path) => {
+            p_indent(out, indent);
+            out.push_str(&format!("import \"{}\"\n", path));
+        }
         Stmt::Continue => {
             p_indent(out, indent);
             out.push_str("continue\n");
@@ -289,6 +293,28 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
                 p_expr(v, indent + 1, out);
             }
             out.push('}');
+        }
+        Expr::Lambda { params, body } => {
+            out.push_str("func (");
+            out.push_str(&params.join(", "));
+            out.push_str(") {\n");
+            p_stmts(body, indent + 1, out);
+            p_indent(out, indent);
+            out.push('}');
+        }
+        Expr::Template(parts) => {
+            out.push('"');
+            for part in parts {
+                match part {
+                    Expr::Str(s) => out.push_str(s),
+                    e => {
+                        out.push_str("${");
+                        p_expr(e, indent + 1, out);
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
         }
         Expr::Match { value, arms } => {
             out.push_str("match ");

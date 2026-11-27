@@ -144,6 +144,7 @@ impl Lexer {
                         't' => out.push('\t'),
                         '"' => out.push('"'),
                         '\\' => out.push('\\'),
+                        '$' => out.push('$'), // cho phép ghi ${ như chuỗi thường
                         other => {
                             return Err(format!(
                                 "Lỗi dòng {}: escape không hợp lệ '\\{}'",
@@ -183,6 +184,7 @@ impl Lexer {
             "return" => TokenKind::Return,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
+            "import" => TokenKind::Import,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,

@@ -1,0 +1,28 @@
+// import_demo.kinet — demo 3 tính năng mới: template ${}, lambda, import
+//
+// Chạy:  cargo run -- examples/import_demo.kinet
+// (đường dẫn import tương đối với thư mục hiện hành)
+
+// 1) import thư viện do mình viết
+import "examples/strings_lib.kinet";
+
+let name = "Kinet";
+
+// 2) template chuỗi ${...} — không cần nối "a" + x + "b" nữa
+println("Xin chào ${name}, đang dùng bản ${LIB_NAME}!");
+println(shout("kinet lang het qua"));
+
+// 3) lambda (hàm ẩn danh) + map/filter
+let nums = [1, 2, 3, 4, 5, 6];
+let binh_phuong = map(nums, func(x) { return x * x; });
+let so_chan = filter(nums, func(x) { return x % 2 == 0; });
+println("bình phương: ", binh_phuong);
+println("số chẵn:     ", so_chan);
+
+// higher-order qua hàm tự viết nhận hàm làm tham số
+func apply2(f, a, b) { return f(a, b); }
+let tong = apply2(func(x, y) { return x + y; }, 20, 22);
+println("tổng = ", tong);
+
+// tận dụng hàm lấy từ thư viện import
+println("Số từ trong '${name} agent': ", count_words("  Kinet agent  "));

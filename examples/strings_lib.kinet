@@ -1,0 +1,12 @@
+// strings_lib.kinet — thư viện nhỏ để demo `import`
+// File này được import bởi import_demo.kinet, không chạy độc lập.
+
+func shout(s) {
+    return to_upper(s) + "!";
+}
+
+func count_words(s) {
+    return len(split(trim(s), " "));
+}
+
+let LIB_NAME = "strings_lib";
