@@ -124,11 +124,14 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 → Nghĩa là mày có thể dùng Kinet để viết trình thông dịch/ngôn ngữ khác, công cụ, thư viện... đúng tinh thần "tạo gì cũng được, miễn có trình".
 
 ## Giới hạn & bảo mật
-- **Ngân sách thực thi**: mặc định 20 triệu bước mỗi `run()` — chống `while true` vô hạn.
-- **`range()`**: tối đa 5 triệu phần tử — chống ăn hết RAM.
-- **Sandbox file I/O** (tùy chọn): đặt env `KINET_SANDBOX_ROOT=/đường/dẫn` để khóa `read_file`/`write_file` nằm trong thư mục đó (chặn `..` và đường dẫn tuyệt đối). Không đặt → `read_file`/`write_file` tự do.
+- **Sandbox file I/O MẶC ĐỊNH BẬT**: `read_file`/`write_file`/`import` bị khóa trong **thư mục hiện hành**. Đổi root bằng `KINET_SANDBOX_ROOT=/đường/dẫn`; tắt để chạy code tin cậy bằng `KINET_SANDBOX=none`. Chặn cả `..`, đường dẫn tuyệt đối **và symlink** (canonicalize rồi kiểm tra nằm trong root).
+- **Trần bộ nhớ**: chuỗi tối đa 64 triệu ký tự, list/map tối đa 2 triệu phần tử — chống `s = s + s` phình RAM (kiểm tra trước khi cấp phát).
+- **Ngân sách thực thi**: 20 triệu bước mỗi `run()` — chống `while true` vô hạn.
+- **`range()`**: tối đa 2 triệu phần tử.
+- **Import** an toàn: chặn import vòng (A→B→A), file lỗi không bị đánh dấu "đã nạp" (import lại sau khi sửa vẫn chạy).
 - **Scope nhất quán**: `if`/`while`/`for`/`match` đều tạo scope riêng — `let` trong block không rò ra ngoài; còn gán `=` vào biến ngoài thì vẫn được.
 - **`return;`** (không giá trị) trả về `nil`.
+- **`\$`** viết được ký tự `$` mà không kích hoạt template (`"\${x}"` → in `"${x}"`).
 
 ## Template chuỗi, Lambda, Import
 
@@ -177,4 +180,5 @@ Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
 - [x] **Giai đoạn A (phần 2):** stack trace khi lỗi (hiện chuỗi hàm gọi `a → b → c`)
 - [x] **Bảo mật & độ chắc:** ngân sách thực thi (chống `while true`), cap `range()`, `return;`, scope nhất quán, sandbox file I/O qua `KINET_SANDBOX_ROOT`, sửa overflow `range`/`substring`, `list_join` đúng chuỗi
 - [x] **Template chuỗi `${x}` + Lambda + Import** (Giai đoạn A xong; mở Phase B)
+- [x] **Audit v3:** sandbox mặc định bật (chống `..`, path tuyệt đối, symlink), trần bộ nhớ (chuỗi/list/map), `\$` escape, range checked_sub, import chống vòng + không nhớ lỗi
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn

@@ -274,7 +274,7 @@ impl Parser {
                 if s.contains("${") {
                     self.template_expr(&s)
                 } else {
-                    Ok(Expr::Str(s))
+                    Ok(Expr::Str(restore_dollar(&s)))
                 }
             }
             TokenKind::True => Ok(Expr::Bool(true)),
@@ -549,7 +549,8 @@ fn split_template(contents: &str) -> Result<Vec<(bool, String)>, String> {
     while i < n {
         if chars[i] == '$' && i + 1 < n && chars[i + 1] == '{' {
             if !literal.is_empty() {
-                parts.push((false, std::mem::take(&mut literal)));
+                parts.push((false, restore_dollar(&literal)));
+                literal.clear();
             }
             i += 2;
             let mut depth = 1usize;
@@ -601,10 +602,25 @@ fn split_template(contents: &str) -> Result<Vec<(bool, String)>, String> {
         }
     }
 
-    if !literal.is_empty() || parts.is_empty() {
-        parts.push((false, literal));
+    if parts.is_empty() {
+        parts.push((false, restore_dollar(&literal)));
+    } else if !literal.is_empty() {
+        parts.push((false, restore_dollar(&literal)));
     }
     Ok(parts)
+}
+
+/// Hoàn trả sentinel (do `\$`) về `$` khi tạo giá trị chuỗi thật.
+fn restore_dollar(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == crate::token::ESCAPED_DOLLAR {
+                '$'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

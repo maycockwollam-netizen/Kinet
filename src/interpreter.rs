@@ -121,8 +121,10 @@ pub struct Interpreter {
     // Ngân sách thực thi: đếm mỗi câu lệnh đã chạy, chống vòng lặp vô hạn.
     steps: u64,
     max_steps: u64,
-    // Các file đã import (đường dẫn đã chuẩn hóa) — tránh import lặp/vòng.
+    // Các file đã import thành công (đường dẫn đã chuẩn hóa).
     imported: HashSet<std::path::PathBuf>,
+    // Các file đang trong quá trình import — phát hiện import vòng.
+    loading: HashSet<std::path::PathBuf>,
 }
 
 //: Giới hạn độ sâu gọi hàm tránh stack overflow. Main chạy trên thread 64MB
@@ -136,7 +138,20 @@ const MAX_STACK_FRAMES: usize = 30;
 // Ngân sách mặc định: số câu lệnh tối đa mỗi lần run() (chống vòng lặp vô hạn).
 const DEFAULT_MAX_STEPS: u64 = 20_000_000;
 // Giới hạn số phần tử tối đa mà range() được phép tạo (chống ăn hết RAM).
-const MAX_RANGE_LEN: i64 = 5_000_000;
+const MAX_RANGE_LEN: i64 = 2_000_000;
+// Trần bộ nhớ cho chuỗi (ký tự) và list/map (phần tử) — chống phình RAM.
+const MAX_STR_CHARS: usize = 64_000_000;
+const MAX_LIST_LEN: usize = 2_000_000;
+
+fn check_len(what: &str, len: usize, max: usize) -> Result<(), String> {
+    if len > max {
+        return Err(format!(
+            "{} quá lớn ({} > giới hạn {}) — nghi ngờ phình bộ nhớ",
+            what, len, max
+        ));
+    }
+    Ok(())
+}
 
 /// Thêm một frame (tên hàm) vào cuối thông báo lỗi, nếu chưa đủ frame.
 fn annotate_stack(mut err: String, fn_name: &str) -> String {
@@ -191,6 +206,7 @@ impl Interpreter {
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
             imported: HashSet::new(),
+            loading: HashSet::new(),
         }
     }
 
@@ -321,22 +337,40 @@ impl Interpreter {
             Stmt::Import(path) => {
                 // Chạy code file import ngay trong cùng global env (function/let
                 // dùng được sau `import`). Tránh import lặp qua set đã chuẩn hóa.
-                let resolved = sandboxed_path(path)?;
+                let resolved = resolve_sandbox(path)?;
                 let canon = resolved.canonicalize().unwrap_or(resolved.clone());
                 if self.imported.contains(&canon) {
                     return Ok(Flow::Normal);
                 }
-                self.imported.insert(canon.clone());
-                let src = std::fs::read_to_string(&canon)
-                    .map_err(|e| format!("import('{}') thất bại: {}", path, e))?;
-                let tokens = crate::lexer::Lexer::new(&src).tokenize()?;
-                let stmts = crate::parser::Parser::new(tokens).parse()?;
-                match self.exec_block(&stmts, self.globals.clone())? {
-                    Flow::Normal => Ok(Flow::Normal),
-                    _ => Err(format!(
-                        "import('{}'): file được import không được có return/break ở top-level",
+                if self.loading.contains(&canon) {
+                    return Err(format!(
+                        "import('{}'): phát hiện import vòng (A import B import A...)",
                         path
-                    )),
+                    ));
+                }
+                self.loading.insert(canon.clone());
+                let outcome = (|| -> Result<Flow, String> {
+                    let src = std::fs::read_to_string(&canon)
+                        .map_err(|e| format!("import('{}') thất bại: {}", path, e))?;
+                    let tokens = crate::lexer::Lexer::new(&src).tokenize()?;
+                    let stmts = crate::parser::Parser::new(tokens).parse()?;
+                    match self.exec_block(&stmts, self.globals.clone())? {
+                        Flow::Normal => Ok(Flow::Normal),
+                        _ => Err(format!(
+                            "import('{}'): file được import không được có return/break ở top-level",
+                            path
+                        )),
+                    }
+                })();
+                // Luôn tháo khỏi 'loading' dù thành công hay lỗi → import lại được.
+                self.loading.remove(&canon);
+                match outcome {
+                    // Chỉ coi là "đã nạp" khi thật sự thành công.
+                    Ok(flow) => {
+                        self.imported.insert(canon);
+                        Ok(flow)
+                    }
+                    Err(e) => Err(format!("{} (từ file import '{}')", e, path)),
                 }
             }
             Stmt::Func {
@@ -377,6 +411,7 @@ impl Interpreter {
                 for part in parts {
                     let v = self.eval(part, env.clone())?;
                     out.push_str(&self.to_string(&v));
+                    check_len("chuỗi template", out.chars().count(), MAX_STR_CHARS)?;
                 }
                 Ok(Value::Str(out))
             }
@@ -497,9 +532,21 @@ impl Interpreter {
                     .checked_add(*b)
                     .map(Value::Int)
                     .ok_or_else(|| "Tràn số khi cộng".to_string()),
-                (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
-                (Value::Str(a), Value::Int(b)) => Ok(Value::Str(format!("{}{}", a, b))),
-                (Value::Int(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
+                (Value::Str(a), Value::Str(b)) => {
+                    // Kiểm tra trước khi cấp phát — chống `s = s + s` phình RAM.
+                    check_len("chuỗi nối", a.chars().count() + b.chars().count(), MAX_STR_CHARS)?;
+                    Ok(Value::Str(format!("{}{}", a, b)))
+                }
+                (Value::Str(a), Value::Int(b)) => {
+                    let len = a.chars().count() + b.to_string().len();
+                    check_len("chuỗi nối", len, MAX_STR_CHARS)?;
+                    Ok(Value::Str(format!("{}{}", a, b)))
+                }
+                (Value::Int(a), Value::Str(b)) => {
+                    let len = a.to_string().len() + b.chars().count();
+                    check_len("chuỗi nối", len, MAX_STR_CHARS)?;
+                    Ok(Value::Str(format!("{}{}", a, b)))
+                }
                 _ => Err("'+' cần hai số hoặc chuỗi".to_string()),
             },
             TokenKind::Minus => self.int_arith(&lv, &rv, op),
@@ -643,6 +690,7 @@ impl Interpreter {
         let mut out = Vec::with_capacity(items.len());
         for item in items {
             out.push(self.call(f.clone(), vec![item.clone()])?);
+            check_len("map() kết quả", out.len(), MAX_LIST_LEN)?;
         }
         Ok(Value::List(out))
     }
@@ -661,6 +709,7 @@ impl Interpreter {
             let result = self.call(f.clone(), vec![item.clone()])?;
             if self.truthy(&result) {
                 out.push(item.clone());
+                check_len("filter() kết quả", out.len(), MAX_LIST_LEN)?;
             }
         }
         Ok(Value::List(out))
@@ -790,6 +839,7 @@ fn native_map_set(args: &[Value]) -> Result<Value, String> {
     let Value::Map(entries) = &args[0] else {
         return Err("map_set() cần map ở đối số đầu".to_string());
     };
+    check_len("map", entries.len() + 1, MAX_LIST_LEN)?;
     let mut out = entries.clone();
     let key = args[1].clone();
     if let Some(idx) = map_index(&out, &key) {
@@ -817,6 +867,7 @@ fn native_chars(args: &[Value]) -> Result<Value, String> {
     let Value::Str(s) = &args[0] else {
         return Err("chars() cần chuỗi".to_string());
     };
+    check_len("chars() kết quả", s.chars().count(), MAX_LIST_LEN)?;
     Ok(Value::List(
         s.chars().map(|c| Value::Str(c.to_string())).collect(),
     ))
@@ -935,7 +986,7 @@ fn native_read_file(args: &[Value]) -> Result<Value, String> {
     let Value::Str(path) = &args[0] else {
         return Err("read_file() cần chuỗi đường dẫn".to_string());
     };
-    let resolved = sandboxed_path(path)?;
+    let resolved = resolve_sandbox(path)?;
     let content = std::fs::read_to_string(&resolved)
         .map_err(|e| format!("read_file('{}') thất bại: {}", path, e))?;
     Ok(Value::Str(content))
@@ -951,7 +1002,7 @@ fn native_write_file(args: &[Value]) -> Result<Value, String> {
     let Value::Str(content) = &args[1] else {
         return Err("write_file() cần nội dung là chuỗi".to_string());
     };
-    let resolved = sandboxed_path(path)?;
+    let resolved = resolve_sandbox(path)?;
     std::fs::write(&resolved, content)
         .map_err(|e| format!("write_file('{}') thất bại: {}", path, e))?;
     Ok(Value::Bool(true))
@@ -972,10 +1023,22 @@ fn native_range(args: &[Value]) -> Result<Value, String> {
         return Err("range(): step không được bằng 0".to_string());
     }
     // Ước lượng số phần tử để chặn range quá lớn (tránh ăn hết RAM).
-    let count = if step > 0 && start < end {
-        (end - start).saturating_add(step - 1) / step
+    // Dùng checked_sub/checked_neg tránh tràn khi start/end cực trị.
+    let count: i64 = if step > 0 && start < end {
+        match end.checked_sub(start) {
+            Some(delta) => match delta.checked_add(step - 1) {
+                Some(d) => d / step,
+                None => i64::MAX,
+            },
+            None => i64::MAX,
+        }
     } else if step < 0 && start > end {
-        (start - end).saturating_add(-(step + 1)) / (-step)
+        match (start.checked_sub(end), step.checked_neg()) {
+            (Some(delta), Some(abs)) if abs >= 1 => {
+                delta.saturating_add(abs - 1) / abs
+            }
+            _ => i64::MAX,
+        }
     } else {
         0
     };
@@ -1028,6 +1091,7 @@ fn native_split(args: &[Value]) -> Result<Value, String> {
         .split(sep)
         .map(|p| Value::Str(p.to_string()))
         .collect();
+    check_len("split() kết quả", parts.len(), MAX_LIST_LEN)?;
     Ok(Value::List(parts))
 }
 
@@ -1090,19 +1154,54 @@ fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
     }
 }
 
-/// Giải quyết đường dẫn cho read_file/write_file.
+/// Chọn thư mục gốc cho sandbox file I/O.
 ///
-/// Nếu biến môi trường `KINET_SANDBOX_ROOT` được đặt, mọi đường dẫn phải nằm
-/// trong thư mục đó (không thoát ra ngoài bằng `..` hay đường dẫn tuyệt đối).
-/// Nếu không đặt biến → tự do (mặc định, phù hợp khi dùng cho script của mình).
-fn sandboxed_path(raw: &str) -> Result<std::path::PathBuf, String> {
-    let Ok(root) = std::env::var("KINET_SANDBOX_ROOT") else {
+/// Mặc định = thư mục hiện hành (an toàn). Đặt `KINET_SANDBOX_ROOT=/đường/dẫn`
+/// để chỉ định root khác. Đặt `KINET_SANDBOX=none` để tắt sandbox (chỉ khi
+/// chạy code đáng tin cậy).
+fn sandbox_root() -> Result<std::path::PathBuf, String> {
+    if let Ok(root) = std::env::var("KINET_SANDBOX_ROOT") {
+        return Ok(std::path::PathBuf::from(root));
+    }
+    std::env::current_dir()
+        .map_err(|e| format!("Không xác định được thư mục hiện hành: {}", e))
+}
+
+/// Giải quyết đường dẫn cho read_file/write_file/import — an toàn với symlink.
+///
+/// 1) `..`/đường tuyệt đối được chuẩn hóa theo chuỗi (chặn thoát theo ký pháp).
+/// 2) canonicalize (giải symlink) rồi kiểm tra vẫn nằm trong root — chống
+///    symlink trỏ ra ngoài. File chưa tồn tại (ghi mới) thì canonicalize tổ
+///    tiên còn tồn tại gần nhất, vẫn phải nằm trong root.
+fn resolve_sandbox(raw: &str) -> Result<std::path::PathBuf, String> {
+    // Cho phép tắt sandbox hoàn toàn khi chạy code đáng tin cậy.
+    if std::env::var("KINET_SANDBOX").as_deref() == Ok("none") {
         return Ok(std::path::PathBuf::from(raw));
-    };
-    let root_path = std::path::PathBuf::from(&root);
-    // Đường dẫn tuyệt đối được xem là tương đối với root.
+    }
+
+    let root = sandbox_root()?;
+    let root_canon = root.canonicalize().map_err(|_| {
+        format!("sandbox root '{}' không tồn tại/hợp lệ", root.display())
+    })?;
+
+    // Bước 1: chuẩn hóa theo chuỗi, chặn `..` thoát root.
+    let lex = lexical_join(&root, raw)?;
+
+    // Bước 2: giải symlink của (đường dẫn hoặc tổ tiên gần nhất) rồi kiểm tra trong root.
+    let canon = canonicalize_loose(&lex);
+    if !canon.starts_with(&root_canon) {
+        return Err(format!(
+            "Đường dẫn '{}' thoát khỏi sandbox '{}' (symlink hoặc ..)",
+            raw,
+            root_canon.display()
+        ));
+    }
+    Ok(canon)
+}
+
+fn lexical_join(root: &std::path::Path, raw: &str) -> Result<std::path::PathBuf, String> {
     let rel: &str = raw.strip_prefix('/').unwrap_or(raw);
-    let mut out = root_path.clone();
+    let mut out = root.to_path_buf();
     let mut depth: i64 = 0; // độ sâu tính từ root
     for comp in std::path::Path::new(rel).components() {
         match comp {
@@ -1116,7 +1215,7 @@ fn sandboxed_path(raw: &str) -> Result<std::path::PathBuf, String> {
                 if depth <= 0 {
                     return Err(format!(
                         "Không được vượt ra ngoài sandbox root '{}'",
-                        root
+                        root.display()
                     ));
                 }
                 depth -= 1;
@@ -1128,6 +1227,33 @@ fn sandboxed_path(raw: &str) -> Result<std::path::PathBuf, String> {
         }
     }
     Ok(out)
+}
+
+/// canonicalize nếu tồn tại; nếu không, canonicalize tổ tiên gần nhất rồi
+/// nối lại phần đuôi còn lại (dùng cho write vào file chưa có).
+fn canonicalize_loose(path: &std::path::Path) -> std::path::PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        match cur.canonicalize() {
+            Ok(c) => {
+                let mut out = c;
+                for t in tail.iter().rev() {
+                    out.push(t);
+                }
+                return out;
+            }
+            Err(_) => match cur.file_name() {
+                Some(name) => {
+                    tail.push(name.to_os_string());
+                    if !cur.pop() {
+                        return path.to_path_buf();
+                    }
+                }
+                None => return path.to_path_buf(),
+            },
+        }
+    }
 }
 
 /// Chuyển một Value thành chuỗi hiển thị (dùng trong list_join và những chỗ
@@ -1164,6 +1290,16 @@ mod tests {
         Parser::new(Lexer::new(src).tokenize().unwrap())
             .parse()
             .unwrap()
+    }
+
+    // Đường dẫn tạm nằm TRONG sandbox mặc định (thư mục hiện hành).
+    fn sandbox_tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::current_dir()
+            .expect("cwd")
+            .join("target")
+            .join("test_tmp");
+        std::fs::create_dir_all(&dir).expect("tạo target/test_tmp");
+        dir.join(name)
     }
 
     // Chạy một closure sinh ra Result<(), String> trên thread stack 64MB (giống
@@ -1437,10 +1573,13 @@ mod tests {
 
     #[test]
     fn file_io_roundtrip() {
-        let path = std::env::temp_dir().join("kinet_m4_io.tmp");
-        let path_str = path.display().to_string();
-        run(&format!("write_file(\"{}\", \"hello demo\");", path_str)).unwrap();
-        let got = run_and_get(&format!("let s = read_file(\"{}\");", path_str), "s");
+        let path = sandbox_tmp("kinet_m4_io.tmp");
+        let rel = format!(
+            "target/test_tmp/{}",
+            path.file_name().unwrap().to_str().unwrap()
+        );
+        run(&format!("write_file(\"{}\", \"hello demo\");", rel)).unwrap();
+        let got = run_and_get(&format!("let s = read_file(\"{}\");", rel), "s");
         assert_eq!(got, Value::Str("hello demo".into()));
         let _ = std::fs::remove_file(&path);
     }
@@ -1636,23 +1775,100 @@ mod tests {
 
     #[test]
     fn import_runs_library_file() {
-        let lib = std::env::temp_dir().join("kinet_import_lib.kinet");
+        let lib = sandbox_tmp("kinet_import_lib.kinet");
         std::fs::write(&lib, "func double(x) { return x * 2; }\n").unwrap();
-        let src = format!("import \"{}\"; let v = double(21);", lib.display());
+        let rel = "target/test_tmp/kinet_import_lib.kinet";
+        let src = format!("import \"{}\"; let v = double(21);", rel);
         assert_eq!(run_and_get(&src, "v"), Value::Int(42));
         let _ = std::fs::remove_file(&lib);
     }
 
     #[test]
     fn import_is_idempotent() {
-        let lib = std::env::temp_dir().join("kinet_import_lib2.kinet");
+        let lib = sandbox_tmp("kinet_import_lib2.kinet");
         std::fs::write(&lib, "let X = 7;    // chỉ đọc 1 lần\n").unwrap();
-        let src = format!(
-            "import \"{}\"; import \"{}\"; let v = X;",
-            lib.display(),
-            lib.display()
-        );
+        let rel = "target/test_tmp/kinet_import_lib2.kinet";
+        let src = format!("import \"{}\"; import \"{}\"; let v = X;", rel, rel);
         assert_eq!(run_and_get(&src, "v"), Value::Int(7));
+        let _ = std::fs::remove_file(&lib);
+    }
+
+    // ----- Hồi quy bảo mật: sandbox mặc định, symlink, template escape, bộ nhớ, import -----
+
+    #[test]
+    fn sandbox_default_blocks_parent_escape() {
+        // Mặc định root = thư mục hiện hành; '..' không thoát được.
+        let err = run(r#"let x = write_file("../escape.txt", "x");"#).unwrap_err();
+        assert!(
+            err.contains("ngoài sandbox") || err.contains("Không được vượt"),
+            "lỗi lạ: {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_blocked() {
+        let outside = std::env::temp_dir().join("kinet_secret.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let link = std::env::current_dir()
+            .unwrap()
+            .join("target/test_tmp/evil_link.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err =
+            run(r#"let s = read_file("target/test_tmp/evil_link.txt");"#).unwrap_err();
+        assert!(
+            err.contains("thoát") || err.contains("sandbox"),
+            "lỗi lạ: {}",
+            err
+        );
+        let _ = std::fs::remove_file(&link);
+        std::fs::remove_file(&outside).ok();
+    }
+
+    #[test]
+    fn template_escape_keeps_literal() {
+        assert_eq!(
+            run_and_get(r#"let s = "a \${b} c";"#, "s"),
+            Value::Str("a ${b} c".into())
+        );
+        assert_eq!(
+            run_and_get(r#"let s = "\${x}";"#, "s"),
+            Value::Str("${x}".into())
+        );
+    }
+
+    #[test]
+    fn string_concat_capped() {
+        // `s = s + s` không được phình RAM vô hạn — chạm trần thì lỗi.
+        let err = run("let s = \"a\"; let n = 0; while n < 100 { s = s + s; n = n + 1; }").unwrap_err();
+        assert!(err.contains("quá lớn"), "lỗi lạ: {}", err);
+    }
+
+    #[test]
+    fn import_cycle_detected() {
+        let a = sandbox_tmp("cyc_a.kinet");
+        let b = sandbox_tmp("cyc_b.kinet");
+        std::fs::write(&a, "import \"target/test_tmp/cyc_b.kinet\"; let FROM_A = 1;\n").unwrap();
+        std::fs::write(&b, "import \"target/test_tmp/cyc_a.kinet\"; let FROM_B = 2;\n").unwrap();
+        let err = run("import \"target/test_tmp/cyc_a.kinet\";").unwrap_err();
+        assert!(err.contains("import vòng"), "lỗi lạ: {}", err);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn import_error_not_cached_as_loaded() {
+        // File import lỗi → không được đánh dấu "đã nạp"; import lại vẫn thấy lỗi.
+        let lib = sandbox_tmp("bad_lib.kinet");
+        std::fs::write(&lib, "let x = 1 / 0;\n").unwrap();
+        let rel = "target/test_tmp/bad_lib.kinet";
+        let err1 = run(&format!("import \"{}\";", rel)).unwrap_err();
+        assert!(err1.contains("Chia cho 0"), "lỗi lạ: {}", err1);
+        let err2 = run(&format!("import \"{}\";", rel)).unwrap_err();
+        assert!(err2.contains("Chia cho 0"), "import lỗi bị bỏ qua: {}", err2);
+        // Lỗi trong file import phải ghi tên file.
+        assert!(err2.contains("từ file import"), "thiếu tên file: {}", err2);
         let _ = std::fs::remove_file(&lib);
     }
 
@@ -1678,6 +1894,7 @@ fn native_append(args: &[Value]) -> Result<Value, String> {
     let Value::List(items) = &args[0] else {
         return Err("append() cần list ở đối số đầu".to_string());
     };
+    check_len("list", items.len() + 1, MAX_LIST_LEN)?;
     let mut out = items.clone();
     out.push(args[1].clone());
     Ok(Value::List(out))

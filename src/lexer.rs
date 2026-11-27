@@ -144,7 +144,7 @@ impl Lexer {
                         't' => out.push('\t'),
                         '"' => out.push('"'),
                         '\\' => out.push('\\'),
-                        '$' => out.push('$'), // cho phép ghi ${ như chuỗi thường
+                        '$' => out.push(crate::token::ESCAPED_DOLLAR), // '\$' → sentinel→'$' khi tạo Str
                         other => {
                             return Err(format!(
                                 "Lỗi dòng {}: escape không hợp lệ '\\{}'",

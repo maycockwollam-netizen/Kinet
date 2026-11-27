@@ -1,5 +1,9 @@
 //! Định nghĩa các loại token (đơn vị nhỏ nhất của code).
 
+/// Sentinel cho `\$` (dollar được escape): lexer đổi `\$` thành ký tự này để
+/// parser phân biệt với `${` (bắt đầu template được sửa ngay khi tạo Str).
+pub const ESCAPED_DOLLAR: char = '\u{E000}';
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
