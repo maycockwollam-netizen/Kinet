@@ -107,7 +107,8 @@ pub enum Stmt {
     Try {
         body: Vec<Stmt>,
         catch_var: Option<String>,
-        catch_body: Vec<Stmt>,
+        catch_body: Option<Vec<Stmt>>,
+        finally_body: Vec<Stmt>,
     },
     Func {
         name: String,

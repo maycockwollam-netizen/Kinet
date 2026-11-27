@@ -57,6 +57,8 @@ try {                          // bắt lỗi runtime
     let r = risky();
 } catch e {
     println("Thất bại: ", e);  // e = thông báo lỗi (kèm số dòng)
+} finally {
+    println("Dọn dẹp xong");   // luôn chạy dù lỗi hay thành công
 }
 
 throw "hết tiền";              // chủ động ném lỗi (try/catch bắt được)
@@ -216,7 +218,7 @@ Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
 - [x] **Template chuỗi `${x}` + Lambda + Import** (Giai đoạn A xong; mở Phase B)
 - [x] **Audit v3:** sandbox mặc định bật (chống `..`, path tuyệt đối, symlink), trần bộ nhớ (chuỗi/list/map), `\$` escape, range checked_sub, import chống vòng + không nhớ lỗi
 - [x] **Dọn nợ:** stack trace CÓ SỐ DÒNG (`Lỗi dòng N` + `tại hàm x (dòng M)`), map chuyển `IndexMap` (tra cứu O(1))
-- [x] **`try/catch`** (bắt lỗi runtime, bind thông báo kèm dòng) + **`float f64`** (số thập phân, trộn được với int)
+- [x] **`try/catch/finally`** (bắt lỗi runtime, bind thông báo kèm dòng; `finally` luôn chạy dù lỗi hay thành công, được quyền `return`/`throw` override kết quả) + **`float f64`** (số thập phân, trộn được với int)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 
 ### Ghi chú thiết kế (đã cân nhắc, không phải bug cấp bách)

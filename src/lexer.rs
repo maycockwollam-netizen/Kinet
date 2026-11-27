@@ -214,6 +214,7 @@ impl Lexer {
             "import" => TokenKind::Import,
             "try" => TokenKind::Try,
             "catch" => TokenKind::Catch,
+            "finally" => TokenKind::Finally,
             "throw" => TokenKind::Throw,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,

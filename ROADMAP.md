@@ -57,8 +57,8 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 - [ ] Tuple / struct nhẹ (map có khoá cố định + validate)
 
 ### B3 — Xử lý lỗi  (≈ 3 buổi)
-- [ ] `try` / `throw` / `catch` (kiểu ngoại lệ)
-- [ ] `finally` / rã giải tài nguyên
+- [x] `try` / `throw` / `catch` (kiểu ngoại lệ)
+- [x] `finally` / rã giải tài nguyên (catch tùy chọn: `try/finally` hợp lệ)
 
 ### B4 — Test + tài liệu  (≈ 3 buổi)
 - [ ] Framework test có sẵn trong ngôn ngữ (`assert`, `test "tên" { }`)

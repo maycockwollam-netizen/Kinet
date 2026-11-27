@@ -142,22 +142,35 @@ impl Parser {
     fn try_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // try
         let body = self.block()?;
-        self.consume(TokenKind::Catch, "mong đợi 'catch' sau khối try")?;
-        let catch_var = if matches!(self.peek().kind, TokenKind::Ident(_)) {
-            let token = self.advance();
-            if let TokenKind::Ident(name) = token.kind {
-                Some(name)
+        // catch [tên biến] { ... } — tùy chọn nếu có finally phía sau.
+        let mut catch_var = None;
+        let mut catch_body = None;
+        if self.match_or(TokenKind::Catch) {
+            catch_var = if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                let token = self.advance();
+                if let TokenKind::Ident(name) = token.kind {
+                    Some(name)
+                } else {
+                    unreachable!()
+                }
             } else {
-                unreachable!()
-            }
-        } else {
-            None
-        };
-        let catch_body = self.block()?;
+                None
+            };
+            catch_body = Some(self.block()?);
+        }
+        // finally { ... } — luôn chạy dù try/catch lỗi hay thành công.
+        let mut finally_body = Vec::new();
+        if self.match_or(TokenKind::Finally) {
+            finally_body = self.block()?;
+        }
+        if catch_body.is_none() && finally_body.is_empty() {
+            return Err(self.error("mong đợi 'catch' hoặc 'finally' sau khối try".to_string()));
+        }
         Ok(Stmt::Try {
             body,
             catch_var,
             catch_body,
+            finally_body,
         })
     }
 

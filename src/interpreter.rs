@@ -482,19 +482,40 @@ impl Interpreter {
                 body,
                 catch_var,
                 catch_body,
+                finally_body,
             } => {
-                // Chỉ bắt lỗi runtime (Err); return/break/continue vẫn đi qua.
-                match self.exec_block(body, env.clone()) {
-                    Ok(flow) => Ok(flow),
+                // Kết quả sau try (+ catch nếu có lỗi và có catch). Lỗi runtime
+                // (Err) thì catch bắt; return/break/continue vẫn đi qua.
+                let mut outcome: Result<Flow, String> = match self.exec_block(body, env.clone()) {
                     Err(error_msg) => {
-                        let scope =
-                            std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
-                        if let Some(var) = catch_var {
-                            scope.borrow_mut().define(var, Value::Str(error_msg));
+                        if let Some(catch_body) = catch_body {
+                            let scope =
+                                std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                            if let Some(var) = catch_var {
+                                scope.borrow_mut().define(var, Value::Str(error_msg));
+                            }
+                            self.exec_block(catch_body, scope)
+                        } else {
+                            // Không có catch — giữ nguyên lỗi để chạy finally rồi
+                            // trả lại lỗi gốc nếu finally bình thường.
+                            Err(error_msg)
                         }
-                        self.exec_block(catch_body, scope)
+                    }
+                    Ok(flow) => Ok(flow),
+                };
+                // finally luôn chạy (nếu có) và được quyền override outcome cũ:
+                // finally lỗi → lỗi mới thay lỗi cũ; finally return/break/continue
+                // → thay kết quả đang dở dang.
+                if !finally_body.is_empty() {
+                    match self.exec_block(finally_body, env.clone()) {
+                        Ok(Flow::Normal) => {}
+                        Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
+                            outcome = Ok(flow)
+                        }
+                        Err(e) => outcome = Err(e),
                     }
                 }
+                outcome
             }
             Stmt::Func {
                 name,
@@ -2455,6 +2476,90 @@ mod tests {
     fn caught_error_message_has_content() {
         let src = r#"let msg = ""; try { let x = 1 / 0; } catch e { msg = e; } let has = contains(msg, "Chia cho 0");"#;
         assert_eq!(run_and_get(src, "has"), Value::Bool(true));
+    }
+
+    // ----- finally -----
+
+    #[test]
+    fn finally_runs_on_success() {
+        let src = r#"let log = "";
+            try { log = log + "try;"; }
+            catch e { log = log + "catch;"; }
+            finally { log = log + "finally;"; }"#;
+        assert_eq!(run_and_get(src, "log"), Value::Str("try;finally;".into()));
+    }
+
+    #[test]
+    fn finally_runs_on_caught_error() {
+        let src = r#"let log = "";
+            try { let x = 1 / 0; log = log + "try;"; }
+            catch e { log = log + "catch;"; }
+            finally { log = log + "finally;"; }"#;
+        assert_eq!(run_and_get(src, "log"), Value::Str("catch;finally;".into()));
+    }
+
+    #[test]
+    fn finally_runs_then_error_propagates() {
+        // try/finally không có catch: lỗi vẫn lan ra ngoài nhưng finally đã chạy.
+        let src = r#"let cleaned = "";
+            try { let x = 1 / 0; } finally { cleaned = "da_don"; }"#;
+        let mut it = Interpreter::new();
+        let res = it.run(&program(src));
+        let err = res.unwrap_err();
+        assert!(err.contains("Chia cho 0"), "lỗi gốc phải còn nguyên: {}", err);
+        assert_eq!(
+            it.globals.borrow().get("cleaned").unwrap(),
+            Value::Str("da_don".into())
+        );
+    }
+
+    #[test]
+    fn finally_runs_on_return_and_preserves_value() {
+        let src = "let g = 0; func f() { try { return 42; } finally { g = 99; } } let v = f();";
+        assert_eq!(run_and_get(src, "v"), Value::Int(42));
+        assert_eq!(run_and_get(src, "g"), Value::Int(99));
+    }
+
+    #[test]
+    fn finally_return_overrides_pending_return() {
+        let src = "func f() { try { return 1; } finally { return 2; } } let v = f();";
+        assert_eq!(run_and_get(src, "v"), Value::Int(2));
+    }
+
+    #[test]
+    fn finally_error_overrides_pending_throw_and_return() {
+        // finally ném lỗi → lỗi mới thay cả return đang dở dang.
+        let src = r#"func f() { try { return 1; } finally { throw "lỗi ở finally"; } } f();"#;
+        let err = run(src).unwrap_err();
+        assert!(err.contains("lỗi ở finally"), "{}", err);
+
+        // finally ném lỗi → đè cả lỗi do try gây ra (chưa có catch).
+        let src2 = r#"try { let x = 1 / 0; } finally { throw "lỗi ở finally"; }"#;
+        let err2 = run(src2).unwrap_err();
+        assert!(err2.contains("lỗi ở finally"), "{}", err2);
+    }
+
+    #[test]
+    fn try_finally_without_catch_allowed() {
+        let src = "let x = 0; try { x = x + 1; } finally { x = x + 10; }";
+        assert_eq!(run_and_get(src, "x"), Value::Int(11));
+    }
+
+    #[test]
+    fn finally_runs_when_break_exits_try() {
+        // break trong try → finally vẫn chạy rồi break mới có hiệu lực.
+        let src = r#"let n = 0;
+            for i in range(0, 10) {
+                try { if i == 2 { break; } } finally { n = n + 1; }
+            }"#;
+        assert_eq!(run_and_get(src, "n"), Value::Int(3));
+    }
+
+    #[test]
+    fn try_requires_catch_or_finally() {
+        let src = "try { let x = 1; }";
+        let res = Parser::new(Lexer::new(src).tokenize().unwrap()).parse();
+        assert!(res.is_err(), "try không có catch/finally phải báo lỗi cú pháp");
     }
 
     // ----- float -----

@@ -210,18 +210,26 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             body,
             catch_var,
             catch_body,
+            finally_body,
         } => {
             p_indent(out, indent);
             out.push_str("try\n");
             p_stmts(body, indent + 1, out);
-            p_indent(out, indent);
-            out.push_str("catch");
-            if let Some(v) = catch_var {
-                out.push(' ');
-                out.push_str(v);
+            if let Some(catch_body) = catch_body {
+                p_indent(out, indent);
+                out.push_str("catch");
+                if let Some(v) = catch_var {
+                    out.push(' ');
+                    out.push_str(v);
+                }
+                out.push('\n');
+                p_stmts(catch_body, indent + 1, out);
             }
-            out.push('\n');
-            p_stmts(catch_body, indent + 1, out);
+            if !finally_body.is_empty() {
+                p_indent(out, indent);
+                out.push_str("finally\n");
+                p_stmts(finally_body, indent + 1, out);
+            }
         }
         Stmt::Continue => {
             p_indent(out, indent);
