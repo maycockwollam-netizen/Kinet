@@ -169,6 +169,10 @@ println(double(21));   // hàm từ file import dùng được ngay
 
 Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
 
+**Công cụ thật làm bằng Kinet**: `cargo run -- examples/file_report.kinet` — quét thư mục,
+đọc từng file, thống kê dòng/từ, ghi báo cáo. Dùng `list_dir`, `exists`, `read_lines`,
+`try/catch`, lambda + `map`/`filter`, template chuỗi, float.
+
 ## Cấu trúc code
 
 | Module | Vai trò |

@@ -1,0 +1,66 @@
+// file_report.kinet — ví dụ "công cụ thật" viết bằng Kinet
+//
+// Quét thư mục examples/, đọc từng file text, thống kê số dòng/số từ,
+// ghi báo cáo ra file. Tận dụng: list_dir, exists, read_file, append_file,
+// read_lines, try/catch, match, lambda + map/filter, template chuỗi, float.
+
+func count_words(s) {
+    return len(split(trim(s), " "));
+}
+
+func analyze_file(name, path) {
+    if not exists(path) {
+        return { "name": name, "ok": false, "error": "thiếu file" };
+    }
+    try {
+        let content = read_file(path);
+        let lines = read_lines(content);
+
+        let words = 0;
+        for ln in lines {
+            words = words + count_words(ln);
+        }
+
+        // Từ trung bình / dòng (số thập phân; tránh chia 0)
+        let avg = match len(lines) {
+            case 0 => 0.0;
+            case _ => to_float(words) / to_float(len(lines));
+        };
+
+        return { "name": name, "ok": true,
+                 "lines": len(lines), "words": words, "avg": avg };
+    } catch e {
+        return { "name": name, "ok": false, "error": "lỗi đọc: " + e };
+    }
+}
+
+func build_report(folder) {
+    let names = list_dir(folder);
+    let results = map(names, func(n) {
+        return analyze_file(n, folder + "/" + n);
+    });
+
+    let done = filter(results, func(r) { return get(r, "ok"); });
+    let failed = filter(results, func(r) { return not get(r, "ok"); });
+
+    let out = [];
+    out = append(out, "BÁO CÁO THƯ MỤC: ${folder}");
+    out = append(out, "Tổng ${len(results)} file — OK ${len(done)}, lỗi ${len(failed)}");
+    for r in results {
+        if get(r, "ok") {
+            out = append(out, "  ✓ ${get(r, \"name\")}: ${get(r, \"lines\")} dòng, "
+                + "${get(r, \"words\")} từ (tb ${str(get(r, \"avg\"))}/dòng)");
+        } else {
+            out = append(out, "  ✗ ${get(r, \"name\")}: ${get(r, \"error\")}");
+        }
+    }
+
+    let report_path = "target/file_report.txt";
+    append_file(report_path, "");               // tạo file nếu chưa có
+    write_file(report_path, list_join(out, "\n") + "\n");
+    return report_path;
+}
+
+let report = build_report("examples");
+println("Đã ghi báo cáo vào ", report, "\n");
+println(read_file(report));
