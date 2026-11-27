@@ -1,0 +1,49 @@
+// agent_flow.kinet — Mốc 2: logic agent viết bằng Kinet
+//
+// Mô phỏng vòng lặp "goal completion" kiểu kinetic_sdk.workflows.goal_completion_loop.
+// Sau này chỗ `agent_run(...)` sẽ thay bằng `my_agent.run(goal)` gọi Kinetic SDK thật.
+
+// ----- Mô phỏng SDK: agent trả kết quả theo từng vòng -----
+let results = ["still-working", "still-working", "success"];
+
+func agent_run(round) {
+    if round >= len(results) {
+        return "success";
+    }
+    return get(results, round);
+}
+
+// ----- Logic agent viết bằng Kinet -----
+func run_agent(goal) {
+    let history = [];
+    let rounds = 0;
+
+    while rounds < 5 {
+        let result = agent_run(rounds);
+        history = append(history, result);
+
+        // Phân loại kết quả tool bằng match — thay vì if/else chồng nhau
+        let status = match result {
+            case "success" => "done";
+            case err => "đang chạy (" + err + ")";
+        };
+
+        println("  vòng ", rounds + 1, ": ", status);
+
+        if status == "done" {
+            println("🎯 Hoàn thành: ", goal);
+            return [rounds + 1, history];
+        }
+        rounds = rounds + 1;
+    }
+
+    println("⚠️  Quá số vòng tối đa — báo cáo thất bại");
+    return [0, history];
+}
+
+println("Bắt đầu agent...");
+let report = run_agent("Sửa lỗi #42");
+let total_rounds = get(report, 0);
+let history = get(report, 1);
+println("Tổng kết: ", total_rounds, " vòng, lịch sử = ", history);
+println("Kết quả cuối: ", get(history, len(history) - 1));
