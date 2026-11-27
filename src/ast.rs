@@ -58,6 +58,11 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    // Mỗi câu lệnh được bọc với số dòng nguồn → báo lỗi có vị trí.
+    Ann {
+        line: usize,
+        inner: Box<Stmt>,
+    },
     Expr(Expr),
     Let {
         name: String,

@@ -121,6 +121,8 @@ pub struct Interpreter {
     // Ngân sách thực thi: đếm mỗi câu lệnh đã chạy, chống vòng lặp vô hạn.
     steps: u64,
     max_steps: u64,
+    // Dòng nguồn của câu lệnh đang thực thi (cho báo lỗi + stack trace).
+    current_line: Option<usize>,
     // Các file đã import thành công (đường dẫn đã chuẩn hóa).
     imported: HashSet<std::path::PathBuf>,
     // Các file đang trong quá trình import — phát hiện import vòng.
@@ -153,14 +155,26 @@ fn check_len(what: &str, len: usize, max: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Thêm một frame (tên hàm) vào cuối thông báo lỗi, nếu chưa đủ frame.
-fn annotate_stack(mut err: String, fn_name: &str) -> String {
+/// Thêm tiền tố "Lỗi dòng N:" — nhà máy ngoài cùng (đã có dòng thì giữ).
+fn annotate_line(line: usize, err: String) -> String {
+    if err.starts_with("Lỗi dòng ") {
+        err
+    } else {
+        format!("Lỗi dòng {}: {}", line, err)
+    }
+}
+
+/// Thêm một frame (tên hàm + dòng gọi) vào cuối thông báo lỗi, nếu chưa đủ frame.
+fn annotate_stack(mut err: String, fn_name: &str, line: Option<usize>) -> String {
     if err.matches(STACK_MARKER).count() >= MAX_STACK_FRAMES {
         return err;
     }
     err.push('\n');
     err.push_str(STACK_MARKER);
     err.push_str(fn_name);
+    if let Some(l) = line {
+        err.push_str(&format!(" (dòng {})", l));
+    }
     err
 }
 
@@ -205,6 +219,7 @@ impl Interpreter {
             call_depth: 0,
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
+            current_line: None,
             imported: HashSet::new(),
             loading: HashSet::new(),
         }
@@ -254,6 +269,13 @@ impl Interpreter {
         // Ngân sách thực thi: chống vòng lặp vô hạn (while true v.v.).
         self.tick()?;
         match stmt {
+            Stmt::Ann { line, inner } => {
+                self.current_line = Some(*line);
+                match self.exec(inner, env) {
+                    Ok(flow) => Ok(flow),
+                    Err(e) => Err(annotate_line(*line, e)),
+                }
+            }
             Stmt::Expr(e) => {
                 self.eval(e, env)?;
                 Ok(Flow::Normal)
@@ -659,6 +681,8 @@ impl Interpreter {
 
         // Môi trường mới có cha là closure của hàm (hỗ trợ biến non-local).
         let fn_name = def.name.clone();
+        // Ghi dòng gọi TRƯỚC khi chạy thân hàm (frame chỉ đúng chỗ gọi).
+        let call_site_line = self.current_line;
         let env = std::rc::Rc::new(std::cell::RefCell::new(Env::child(def.closure.clone())));
         for (param, arg) in def.params.iter().zip(args) {
             env.borrow_mut().define(param, arg);
@@ -666,8 +690,8 @@ impl Interpreter {
         self.call_depth += 1;
         let result = self.exec_block(&def.body, env);
         self.call_depth -= 1;
-        // Khi hàm gặp lỗi, đính kèm tên hàm vào chuỗi lỗi (stack trace).
-        let flow = result.map_err(|e| annotate_stack(e, &fn_name))?;
+        // Khi hàm gặp lỗi, đính kèm tên hàm + dòng gọi vào chuỗi lỗi (stack trace).
+        let flow = result.map_err(|e| annotate_stack(e, &fn_name, call_site_line))?;
         match flow {
             Flow::Return(v) => Ok(v),
             Flow::Break | Flow::Continue => Err(format!(
@@ -1487,6 +1511,29 @@ mod tests {
         let run_result = run_on_big_stack(move || Interpreter::new().run(&program(&src)));
         let err = run_result.unwrap_err();
         assert!(err.contains("Độ sâu"));
+    }
+
+    #[test]
+    fn error_reports_source_line() {
+        let src = "let a = 1;\nlet b = 2;\nlet c = 1 / 0;\n";
+        let err = run(src).unwrap_err();
+        assert!(err.contains("Lỗi dòng 3: Chia cho 0"), "lỗi lạ: {}", err);
+    }
+
+    #[test]
+    fn stack_trace_includes_call_lines() {
+        let src = "func a() {\n    return b();\n}\nfunc b() {\n    let x = 1 / 0;\n    return x;\n}\na();\n";
+        let err = run(src).unwrap_err();
+        assert!(
+            err.contains("tại hàm b (dòng "),
+            "thiếu dòng trong frame b:\n{}",
+            err
+        );
+        assert!(
+            err.contains("tại hàm a (dòng "),
+            "thiếu dòng trong frame a:\n{}",
+            err
+        );
     }
 
     #[test]

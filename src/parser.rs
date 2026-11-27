@@ -35,6 +35,15 @@ impl Parser {
     // ---------- Statements ----------
 
     fn statement(&mut self) -> Result<Stmt, String> {
+        let line = self.peek().line;
+        let inner = self.statement_inner()?;
+        Ok(Stmt::Ann {
+            line,
+            inner: Box::new(inner),
+        })
+    }
+
+    fn statement_inner(&mut self) -> Result<Stmt, String> {
         let kind = self.peek().kind.clone();
         match kind {
             TokenKind::Let => self.let_stmt(),
@@ -633,10 +642,18 @@ mod tests {
         Parser::new(tokens).parse().unwrap()
     }
 
+    // Gỡ lớp Ann (số dòng) để test mổ cấu trúc câu lệnh.
+    fn unann(s: &Stmt) -> &Stmt {
+        match s {
+            Stmt::Ann { inner, .. } => inner,
+            other => other,
+        }
+    }
+
     #[test]
     fn precedence_2_plus_3_mul_4() {
         let stmts = parse("let x = 2 + 3 * 4;");
-        let Stmt::Let { value, .. } = &stmts[0] else {
+        let Stmt::Let { value, .. } = unann(&stmts[0]) else {
             panic!("mong đợi let");
         };
         let Expr::Binary { op: plus, right, .. } = value else {
@@ -652,7 +669,7 @@ mod tests {
     #[test]
     fn parens_override_precedence() {
         let stmts = parse("let x = (2 + 3) * 4;");
-        let Stmt::Let { value, .. } = &stmts[0] else {
+        let Stmt::Let { value, .. } = unann(&stmts[0]) else {
             panic!();
         };
         let Expr::Binary { op, .. } = value else {
@@ -664,7 +681,7 @@ mod tests {
     #[test]
     fn match_parses_arms() {
         let stmts = parse("let s = match x { case 1 => 10; case e => e; default => 0; };");
-        let Stmt::Let { value, .. } = &stmts[0] else {
+        let Stmt::Let { value, .. } = unann(&stmts[0]) else {
             panic!("mong đợi let");
         };
         let Expr::Match { arms, .. } = value else {
@@ -679,7 +696,7 @@ mod tests {
     #[test]
     fn for_stmt_parses() {
         let stmts = parse("for i in range(0, 5) { println(i); }");
-        let Stmt::For { var, iterable, body } = &stmts[0] else {
+        let Stmt::For { var, iterable, body } = unann(&stmts[0]) else {
             panic!("mong đợi For");
         };
         assert_eq!(var, "i");
@@ -690,7 +707,7 @@ mod tests {
     #[test]
     fn list_literal_parses() {
         let stmts = parse("let a = [1, \"hai\", true];");
-        let Stmt::Let { value, .. } = &stmts[0] else {
+        let Stmt::Let { value, .. } = unann(&stmts[0]) else {
             panic!();
         };
         let Expr::List(items) = value else {
@@ -702,7 +719,7 @@ mod tests {
     #[test]
     fn nested_function_call() {
         let stmts = parse("let x = get(split(\"a,b\", \",\"), 1);");
-        let Stmt::Let { value, .. } = &stmts[0] else {
+        let Stmt::Let { value, .. } = unann(&stmts[0]) else {
             panic!();
         };
         assert!(matches!(value, Expr::Call { .. }));

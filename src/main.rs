@@ -148,6 +148,8 @@ fn p_indent<'a>(out: &mut String, n: usize) {
 
 fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
     match stmt {
+        // Bỏ qua lớp Ann khi in AST — nội dung đã đủ.
+        Stmt::Ann { inner, .. } => p_stmt(inner, indent, out),
         Stmt::Let { name, value } => {
             p_indent(out, indent);
             out.push_str(&format!("let {} = ", name));
