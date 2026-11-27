@@ -225,3 +225,97 @@ impl Lexer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::TokenKind;
+
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        Lexer::new(src)
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
+    }
+
+    #[test]
+    fn tokenize_let_and_expression() {
+        assert_eq!(
+            kinds("let x = 2 + 3;"),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident("x".into()),
+                TokenKind::Assign,
+                TokenKind::Number(2),
+                TokenKind::Plus,
+                TokenKind::Number(3),
+                TokenKind::Semi,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_string_with_escape() {
+        assert_eq!(kinds(r#""a\nb""#)[0], TokenKind::Str("a\nb".into()));
+    }
+
+    #[test]
+    fn tokenize_all_keywords() {
+        let src = "let func if else while for in return break continue match case default print println and or not true false";
+        let got = kinds(src);
+        for kw in [
+            TokenKind::Let,
+            TokenKind::Func,
+            TokenKind::If,
+            TokenKind::Else,
+            TokenKind::While,
+            TokenKind::For,
+            TokenKind::In,
+            TokenKind::Return,
+            TokenKind::Break,
+            TokenKind::Continue,
+            TokenKind::Match,
+            TokenKind::Case,
+            TokenKind::Default,
+            TokenKind::Print,
+            TokenKind::Println,
+            TokenKind::And,
+            TokenKind::Or,
+            TokenKind::Not,
+            TokenKind::True,
+            TokenKind::False,
+        ] {
+            assert!(got.contains(&kw), "thiếu keyword: {:?}", kw);
+        }
+    }
+
+    #[test]
+    fn tokenize_arrow_and_brackets() {
+        let got = kinds("x => [1, 2];");
+        assert!(got.contains(&TokenKind::Arrow));
+        assert!(got.contains(&TokenKind::LBracket));
+        assert!(got.contains(&TokenKind::RBracket));
+    }
+
+    #[test]
+    fn skip_comments() {
+        let got = kinds("// chú thích\nlet a = 1;");
+        assert!(got.contains(&TokenKind::Let));
+        assert!(!got.iter().any(|k| matches!(k, TokenKind::Slash)));
+    }
+
+    #[test]
+    fn unterminated_string_errors() {
+        let err = Lexer::new(r#""abc"#).tokenize().unwrap_err();
+        assert!(err.contains("chuỗi chưa đóng"));
+    }
+
+    #[test]
+    fn invalid_char_errors() {
+        let err = Lexer::new("let @ = 1;").tokenize().unwrap_err();
+        assert!(err.contains("ký tự không hợp lệ"));
+    }
+}

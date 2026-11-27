@@ -1,9 +1,11 @@
 //! Kinet — ngôn ngữ lập trình nhỏ do bạn tự viết, dành cho agent SDK.
 //!
 //! Cách dùng:
-//!   cargo run             → mở REPL
-//!   cargo run -- file.kinet → chạy file source
-//!   cargo run -- -e "println(2 + 3)" → chạy code từ tham số
+//!   cargo run                    → mở REPL
+//!   cargo run -- file.kinet      → chạy file source
+//!   cargo run -- -e "code"       → chạy code từ tham số
+//!   cargo run -- --tokens file   → xem danh sách token (Lexer)
+//!   cargo run -- --ast file      → xem cây cú pháp (Parser)
 
 mod ast;
 mod interpreter;
@@ -16,9 +18,11 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
+use ast::{Expr, Pattern, Stmt};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
+use token::TokenKind;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -30,27 +34,38 @@ fn main() -> ExitCode {
             eprintln!("Cần code sau '-e'");
             return ExitCode::FAILURE;
         }
-        match run_source(&args[1]) {
-            Ok(()) => ExitCode::SUCCESS,
+        run_or_report(&args[1])
+    } else if args[0] == "--tokens" {
+        if args.len() < 2 {
+            eprintln!("Cần file sau '--tokens'");
+            ExitCode::FAILURE
+        } else {
+            cmd_tokens(&args[1])
+        }
+    } else if args[0] == "--ast" {
+        if args.len() < 2 {
+            eprintln!("Cần file sau '--ast'");
+            ExitCode::FAILURE
+        } else {
+            cmd_ast(&args[1])
+        }
+    } else {
+        match fs::read_to_string(&args[0]) {
+            Ok(source) => run_or_report(&source),
             Err(e) => {
-                eprintln!("{}", e);
+                eprintln!("Không đọc được file '{}': {}", args[0], e);
                 ExitCode::FAILURE
             }
         }
-    } else {
-        let path = &args[0];
-        match fs::read_to_string(path) {
-            Ok(source) => match run_source(&source) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("{}", e);
-                    ExitCode::FAILURE
-                }
-            },
-            Err(e) => {
-                eprintln!("Không đọc được file '{}': {}", path, e);
-                ExitCode::FAILURE
-            }
+    }
+}
+
+fn run_or_report(source: &str) -> ExitCode {
+    match run_source(source) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
         }
     }
 }
@@ -60,6 +75,237 @@ fn run_source(source: &str) -> Result<(), String> {
     let stmts = Parser::new(tokens).parse()?;
     let mut interpreter = Interpreter::new();
     interpreter.run(&stmts)
+}
+
+/// `--tokens`: in ra từng token sau giai đoạn Lexer.
+fn cmd_tokens(path: &str) -> ExitCode {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Không đọc được file '{}': {}", path, e);
+            return ExitCode::FAILURE;
+        }
+    };
+    match Lexer::new(&source).tokenize() {
+        Ok(tokens) => {
+            println!("        {:?}", tokens.iter().map(|t| t.kind.clone()).collect::<Vec<_>>());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--ast`: in cây cú pháp sau giai đoạn Parser (đã format dễ đọc).
+fn cmd_ast(path: &str) -> ExitCode {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Không đọc được file '{}': {}", path, e);
+            return ExitCode::FAILURE;
+        }
+    };
+    match Lexer::new(&source).tokenize().and_then(|t| Parser::new(t).parse()) {
+        Ok(stmts) => {
+            let mut out = String::new();
+            for stmt in &stmts {
+                p_stmt(stmt, 0, &mut out);
+            }
+            print!("{}", out);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ---------- In cây cú pháp (AST printer) ----------
+
+fn p_indent<'a>(out: &mut String, n: usize) {
+    for _ in 0..n {
+        out.push_str("  ");
+    }
+}
+
+fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
+    match stmt {
+        Stmt::Let { name, value } => {
+            p_indent(out, indent);
+            out.push_str(&format!("let {} = ", name));
+            p_expr(value, 0, out);
+            out.push('\n');
+        }
+        Stmt::Print(exprs) => {
+            p_indent(out, indent);
+            out.push_str("print(");
+            p_exprs(exprs, 0, out);
+            out.push_str(")\n");
+        }
+        Stmt::Println(exprs) => {
+            p_indent(out, indent);
+            out.push_str("println(");
+            p_exprs(exprs, 0, out);
+            out.push_str(")\n");
+        }
+        Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            p_indent(out, indent);
+            out.push_str("if ");
+            p_expr(cond, 0, out);
+            out.push('\n');
+            p_stmts(then_branch, indent + 1, out);
+            if !else_branch.is_empty() {
+                p_indent(out, indent);
+                out.push_str("else\n");
+                p_stmts(else_branch, indent + 1, out);
+            }
+        }
+        Stmt::While { cond, body } => {
+            p_indent(out, indent);
+            out.push_str("while ");
+            p_expr(cond, 0, out);
+            out.push('\n');
+            p_stmts(body, indent + 1, out);
+        }
+        Stmt::For { var, iterable, body } => {
+            p_indent(out, indent);
+            out.push_str(&format!("for {} in ", var));
+            p_expr(iterable, 0, out);
+            out.push('\n');
+            p_stmts(body, indent + 1, out);
+        }
+        Stmt::Break => {
+            p_indent(out, indent);
+            out.push_str("break\n");
+        }
+        Stmt::Continue => {
+            p_indent(out, indent);
+            out.push_str("continue\n");
+        }
+        Stmt::Func {
+            name,
+            params,
+            body,
+        } => {
+            p_indent(out, indent);
+            out.push_str(&format!("func {}({})\n", name, params.join(", ")));
+            p_stmts(body, indent + 1, out);
+        }
+        Stmt::Return(e) => {
+            p_indent(out, indent);
+            out.push_str("return ");
+            p_expr(e, 0, out);
+            out.push('\n');
+        }
+        Stmt::Expr(e) => {
+            p_indent(out, indent);
+            p_expr(e, 0, out);
+            out.push('\n');
+        }
+    }
+}
+
+fn p_stmts(stmts: &[Stmt], indent: usize, out: &mut String) {
+    for s in stmts {
+        p_stmt(s, indent, out);
+    }
+}
+
+fn p_exprs(exprs: &[Expr], indent: usize, out: &mut String) {
+    for (i, e) in exprs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        p_expr(e, indent, out);
+    }
+}
+
+fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
+    match expr {
+        Expr::Number(n) => out.push_str(&n.to_string()),
+        Expr::Str(s) => out.push_str(&format!("\"{}\"", s)),
+        Expr::Bool(b) => out.push_str(&b.to_string()),
+        Expr::Variable(name) => out.push_str(name),
+        Expr::Assign { name, value } => {
+            out.push_str(name);
+            out.push_str(" = ");
+            p_expr(value, indent, out);
+        }
+        Expr::Unary { op, expr } => {
+            out.push_str(op_symbol(op));
+            p_expr(expr, indent + 1, out);
+        }
+        Expr::Binary { left, op, right } => {
+            out.push('(');
+            p_expr(left, indent + 1, out);
+            out.push(' ');
+            out.push_str(op_symbol(op));
+            out.push(' ');
+            p_expr(right, indent + 1, out);
+            out.push(')');
+        }
+        Expr::Call { callee, args } => {
+            p_expr(callee, indent, out);
+            out.push('(');
+            p_exprs(args, indent + 1, out);
+            out.push(')');
+        }
+        Expr::List(items) => {
+            out.push('[');
+            p_exprs(items, indent + 1, out);
+            out.push(']');
+        }
+        Expr::Match { value, arms } => {
+            out.push_str("match ");
+            p_expr(value, indent, out);
+            out.push_str(" {\n");
+            for arm in arms {
+                p_indent(out, indent + 1);
+                out.push_str("case ");
+                p_pattern(&arm.pattern, indent + 1, out);
+                out.push_str(" => ");
+                p_expr(&arm.body, indent + 1, out);
+                out.push('\n');
+            }
+            p_indent(out, indent);
+            out.push('}');
+        }
+    }
+}
+
+fn p_pattern(pattern: &Pattern, indent: usize, out: &mut String) {
+    match pattern {
+        Pattern::Literal(e) => p_expr(e, indent, out),
+        Pattern::Binding(name) => out.push_str(name),
+        Pattern::Wildcard => out.push('_'),
+    }
+}
+
+fn op_symbol(op: &TokenKind) -> &'static str {
+    match op {
+        TokenKind::Plus => "+",
+        TokenKind::Minus => "-",
+        TokenKind::Star => "*",
+        TokenKind::Slash => "/",
+        TokenKind::Percent => "%",
+        TokenKind::Eq => "==",
+        TokenKind::NotEq => "!=",
+        TokenKind::Lt => "<",
+        TokenKind::Gt => ">",
+        TokenKind::Le => "<=",
+        TokenKind::Ge => ">=",
+        TokenKind::And => "and",
+        TokenKind::Or => "or",
+        TokenKind::Not => "not",
+        _ => "?",
+    }
 }
 
 fn repl() {

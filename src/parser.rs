@@ -424,3 +424,103 @@ impl Parser {
         format!("Lỗi cú pháp dòng {}: {}", self.peek().line, msg)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(src: &str) -> Vec<Stmt> {
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens).parse().unwrap()
+    }
+
+    #[test]
+    fn precedence_2_plus_3_mul_4() {
+        let stmts = parse("let x = 2 + 3 * 4;");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("mong đợi let");
+        };
+        let Expr::Binary { op: plus, right, .. } = value else {
+            panic!("mong đợi Binary");
+        };
+        assert_eq!(*plus, TokenKind::Plus);
+        let Expr::Binary { op: star, .. } = &**right else {
+            panic!("mong đợi * ở vế phải");
+        };
+        assert_eq!(*star, TokenKind::Star);
+    }
+
+    #[test]
+    fn parens_override_precedence() {
+        let stmts = parse("let x = (2 + 3) * 4;");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!();
+        };
+        let Expr::Binary { op, .. } = value else {
+            panic!();
+        };
+        assert_eq!(*op, TokenKind::Star);
+    }
+
+    #[test]
+    fn match_parses_arms() {
+        let stmts = parse("let s = match x { case 1 => 10; case e => e; default => 0; };");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!("mong đợi let");
+        };
+        let Expr::Match { arms, .. } = value else {
+            panic!("mong đợi Match");
+        };
+        assert_eq!(arms.len(), 3);
+        assert!(matches!(&arms[0].pattern, Pattern::Literal(Expr::Number(1))));
+        assert!(matches!(&arms[1].pattern, Pattern::Binding(name) if name == "e"));
+        assert!(matches!(&arms[2].pattern, Pattern::Wildcard));
+    }
+
+    #[test]
+    fn for_stmt_parses() {
+        let stmts = parse("for i in range(0, 5) { println(i); }");
+        let Stmt::For { var, iterable, body } = &stmts[0] else {
+            panic!("mong đợi For");
+        };
+        assert_eq!(var, "i");
+        assert!(matches!(iterable, Expr::Call { .. }));
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn list_literal_parses() {
+        let stmts = parse("let a = [1, \"hai\", true];");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!();
+        };
+        let Expr::List(items) = value else {
+            panic!("mong đợi List");
+        };
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn nested_function_call() {
+        let stmts = parse("let x = get(split(\"a,b\", \",\"), 1);");
+        let Stmt::Let { value, .. } = &stmts[0] else {
+            panic!();
+        };
+        assert!(matches!(value, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn syntax_error_reports_line() {
+        let tokens = Lexer::new("let = 3;").tokenize().unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.contains("dòng 1"));
+    }
+
+    #[test]
+    fn unterminated_block_errors() {
+        let tokens = Lexer::new("if true { println(1);").tokenize().unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.contains("mong đợi '}'"));
+    }
+}

@@ -655,6 +655,165 @@ fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn program(src: &str) -> Vec<Stmt> {
+        Parser::new(Lexer::new(src).tokenize().unwrap())
+            .parse()
+            .unwrap()
+    }
+
+    fn run(src: &str) -> Result<(), String> {
+        let mut it = Interpreter::new();
+        it.run(&program(src))
+    }
+
+    fn run_and_get(src: &str, var: &str) -> Value {
+        let mut it = Interpreter::new();
+        it.run(&program(src)).unwrap();
+        it.globals.borrow().get(var).unwrap()
+    }
+
+    #[test]
+    fn arithmetic_follows_precedence() {
+        assert_eq!(run_and_get("let x = 2 + 3 * 4;", "x"), Value::Int(14));
+        assert_eq!(run_and_get("let x = (2 + 3) * 4;", "x"), Value::Int(20));
+        assert_eq!(run_and_get("let x = 7 % 3;", "x"), Value::Int(1));
+    }
+
+    #[test]
+    fn string_concat() {
+        assert_eq!(
+            run_and_get(r#"let x = "a" + "b" + 1;"#, "x"),
+            Value::Str("ab1".into())
+        );
+    }
+
+    #[test]
+    fn variables_and_assignment() {
+        let src = "let a = 5; a = a + 2; let b = a * 2;";
+        assert_eq!(run_and_get(src, "b"), Value::Int(14));
+    }
+
+    #[test]
+    fn function_recursion() {
+        let src = "func fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); } let x = fact(5);";
+        assert_eq!(run_and_get(src, "x"), Value::Int(120));
+    }
+
+    #[test]
+    fn function_closure_reads_outer() {
+        let src = "let base = 10; func add(x) { return base + x; } let y = add(5);";
+        assert_eq!(run_and_get(src, "y"), Value::Int(15));
+    }
+
+    #[test]
+    fn while_loop() {
+        let src = "let total = 0; let i = 1; while i <= 5 { total = total + i; i = i + 1; }";
+        assert_eq!(run_and_get(src, "total"), Value::Int(15));
+    }
+
+    #[test]
+    fn for_with_break() {
+        let src = "let last = 0; for i in range(0, 100) { if i == 5 { break; } last = i; }";
+        assert_eq!(run_and_get(src, "last"), Value::Int(4));
+    }
+
+    #[test]
+    fn for_with_continue() {
+        let src = "let n = 0; for i in range(0, 5) { if i == 2 { continue; } n = n + 1; }";
+        assert_eq!(run_and_get(src, "n"), Value::Int(4));
+    }
+
+    #[test]
+    fn for_over_list() {
+        let src = r#"let s = ""; for x in ["a", "b", "c"] { s = s + x; }"#;
+        assert_eq!(run_and_get(src, "s"), Value::Str("abc".into()));
+    }
+
+    #[test]
+    fn match_selects_by_ordinal() {
+        let src = r#"let r = match "ok" { case "ok" => 1; case e => 2; };"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(1));
+    }
+
+    #[test]
+    fn match_binding_captures_value() {
+        let src = r#"let r = match "xyz" { case "ok" => "ok"; case e => "got:" + e; };"#;
+        assert_eq!(run_and_get(src, "r"), Value::Str("got:xyz".into()));
+    }
+
+    #[test]
+    fn list_builtins() {
+        let src = "let n = [1, 2, 3]; let l = len(n); let h = contains(n, 2); let ap = append(n, 4); let g = get(ap, 3);";
+        assert_eq!(run_and_get(src, "l"), Value::Int(3));
+        assert_eq!(run_and_get(src, "h"), Value::Bool(true));
+        assert_eq!(
+            run_and_get(src, "ap"),
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+        );
+        assert_eq!(run_and_get(src, "g"), Value::Int(4));
+    }
+
+    #[test]
+    fn string_functions() {
+        let src = r#"let a = starts_with("run: x", "run:");
+            let b = ends_with("file.kinet", ".kinet");
+            let c = trim("  hi  ");
+            let d = replace("a-b-c", "-", "+");
+            let e = get(split("x,y,z", ","), 2);
+            let f = contains("xin chao", "chao");"#;
+        assert_eq!(run_and_get(src, "a"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "b"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "c"), Value::Str("hi".into()));
+        assert_eq!(run_and_get(src, "d"), Value::Str("a+b+c".into()));
+        assert_eq!(run_and_get(src, "e"), Value::Str("z".into()));
+        assert_eq!(run_and_get(src, "f"), Value::Bool(true));
+    }
+
+    #[test]
+    fn range_with_step() {
+        assert_eq!(
+            run_and_get("let r = range(5, 0, -2);", "r"),
+            Value::List(vec![Value::Int(5), Value::Int(3), Value::Int(1)])
+        );
+    }
+
+    #[test]
+    fn divide_by_zero_errors() {
+        let err = run("let x = 1 / 0;").unwrap_err();
+        assert!(err.contains("Chia cho 0"));
+    }
+
+    #[test]
+    fn undefined_variable_errors() {
+        let err = run("println(unknown_var);").unwrap_err();
+        assert!(err.contains("Chưa khai báo biến"));
+    }
+
+    #[test]
+    fn break_outside_loop_errors() {
+        let err = run("break;").unwrap_err();
+        assert!(err.contains("ngoài vòng lặp"));
+    }
+
+    #[test]
+    fn match_without_default_errors_when_no_match() {
+        let err = run(r#"let r = match "c" { case "a" => 1; case "b" => 2; };"#).unwrap_err();
+        assert!(err.contains("khớp"));
+    }
+
+    #[test]
+    fn for_over_non_list_errors() {
+        let err = run("for x in 5 { }").unwrap_err();
+        assert!(err.contains("cần list"));
+    }
+}
+
 fn native_append(args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err("append() cần 2 đối số (list, x)".to_string());

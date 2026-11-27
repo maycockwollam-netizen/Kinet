@@ -12,6 +12,9 @@ Code text → Lexer → Token → Parser → AST → Interpreter → Kết quả
 cargo run                     # mở REPL
 cargo run -- file.kinet         # chạy file source
 cargo run -- -e "code"        # chạy code từ dòng lệnh
+cargo run -- --tokens file    # xem danh sách token (Lexer)
+cargo run -- --ast file       # xem cây cú pháp (Parser)
+cargo test                    # chạy unit test
 ```
 
 Ví dụ: `cargo run -- examples/demo.kinet`
@@ -105,6 +108,8 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 - [x] List + hàm dựng sẵn (`len`, `get`, `contains`, `append`)
 - [x] `for` loop + `break`/`continue`
 - [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
+- [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
+- [x] Unit test (34 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
 - [ ] **Nối Kinetic SDK** qua PyO3 (như `_kinetic_rs`) — Kinet điều khiển agent thật
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
