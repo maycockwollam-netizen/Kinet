@@ -242,6 +242,12 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             p_expr(e, 0, out);
             out.push('\n');
         }
+        Stmt::Throw(e) => {
+            p_indent(out, indent);
+            out.push_str("throw ");
+            p_expr(e, 0, out);
+            out.push('\n');
+        }
         Stmt::Expr(e) => {
             p_indent(out, indent);
             p_expr(e, 0, out);
@@ -296,6 +302,26 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             out.push('(');
             p_exprs(args, indent + 1, out);
             out.push(')');
+        }
+        Expr::Index { target, index } => {
+            p_expr(target, indent, out);
+            out.push('[');
+            p_expr(index, indent + 1, out);
+            out.push(']');
+        }
+        Expr::IndexAssign {
+            name,
+            indices,
+            value,
+        } => {
+            out.push_str(name);
+            for idx in indices {
+                out.push('[');
+                p_expr(idx, indent + 1, out);
+                out.push(']');
+            }
+            out.push_str(" = ");
+            p_expr(value, indent + 1, out);
         }
         Expr::List(items) => {
             out.push('[');
@@ -375,6 +401,10 @@ fn op_symbol(op: &TokenKind) -> &'static str {
         TokenKind::Gt => ">",
         TokenKind::Le => "<=",
         TokenKind::Ge => ">=",
+        TokenKind::Shl => "<<",
+        TokenKind::Shr => ">>",
+        TokenKind::Band => "&",
+        TokenKind::Bor => "|",
         TokenKind::And => "and",
         TokenKind::Or => "or",
         TokenKind::Not => "not",

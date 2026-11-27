@@ -43,6 +43,16 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+    },
+    // Gán mục: `name[i][j] = value` — cập nhật trong container có tên rõ ràng.
+    IndexAssign {
+        name: String,
+        indices: Vec<Expr>,
+        value: Box<Expr>,
+    },
     Lambda {
         params: Vec<String>,
         body: Vec<Stmt>,
@@ -88,6 +98,7 @@ pub enum Stmt {
     Break,
     Continue,
     Import(String),
+    Throw(Expr),
     Try {
         body: Vec<Stmt>,
         catch_var: Option<String>,

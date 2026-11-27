@@ -88,6 +88,8 @@ impl Lexer {
             '<' => {
                 if self.match_char('=') {
                     TokenKind::Le
+                } else if self.match_char('<') {
+                    TokenKind::Shl
                 } else {
                     TokenKind::Lt
                 }
@@ -95,10 +97,14 @@ impl Lexer {
             '>' => {
                 if self.match_char('=') {
                     TokenKind::Ge
+                } else if self.match_char('>') {
+                    TokenKind::Shr
                 } else {
                     TokenKind::Gt
                 }
             }
+            '&' => TokenKind::Band,
+            '|' => TokenKind::Bor,
             _ => return Err(format!("Lỗi dòng {}: ký tự không hợp lệ '{}'", line, c)),
         };
 
@@ -162,6 +168,7 @@ impl Lexer {
                     match esc {
                         'n' => out.push('\n'),
                         't' => out.push('\t'),
+                        'r' => out.push('\r'),
                         '"' => out.push('"'),
                         '\\' => out.push('\\'),
                         '$' => out.push(crate::token::ESCAPED_DOLLAR), // '\$' → sentinel→'$' khi tạo Str
@@ -207,6 +214,7 @@ impl Lexer {
             "import" => TokenKind::Import,
             "try" => TokenKind::Try,
             "catch" => TokenKind::Catch,
+            "throw" => TokenKind::Throw,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,

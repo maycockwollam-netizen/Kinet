@@ -58,6 +58,14 @@ try {                          // bắt lỗi runtime
 } catch e {
     println("Thất bại: ", e);  // e = thông báo lỗi (kèm số dòng)
 }
+
+throw "hết tiền";              // chủ động ném lỗi (try/catch bắt được)
+
+let a = [1, 2, 3];
+a[1] = 99;                     // ghi mục trong list
+let m = { "x": 1 };
+m["y"] = 2;                    // ghi mục trong map
+println(a[1], m["y"]);         // đọc mục — kể cả lồng: grid[r][c]
 ```
 
 ### Kiểu dữ liệu hiện có
@@ -119,8 +127,9 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 ### Toán tử
 - Số học: `+ - * / %` (có `+` cho chuỗi — nối kiểu)
 - So sánh: `== != < > <= >=`
+- Bit: `& | << >>` (chỉ số nguyên)
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)
-- Phép gán: `=`
+- Phép gán: `=` `a[i] = v` `m["k"] = v`
 
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
@@ -139,7 +148,7 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 ## Giới hạn & bảo mật
 - **Sandbox file I/O MẶC ĐỊNH BẬT**: `read_file`/`write_file`/`import` bị khóa trong **thư mục hiện hành**. Đổi root bằng `KINET_SANDBOX_ROOT=/đường/dẫn`; tắt để chạy code tin cậy bằng `KINET_SANDBOX=none`. Chặn cả `..`, đường dẫn tuyệt đối **và symlink** (canonicalize rồi kiểm tra nằm trong root).
 - **Trần bộ nhớ**: chuỗi tối đa 64 triệu ký tự, list/map tối đa 2 triệu phần tử — chống `s = s + s` phình RAM (kiểm tra trước khi cấp phát).
-- **Ngân sách thực thi**: 20 triệu bước mỗi `run()` — chống `while true` vô hạn.
+- **Ngân sách thực thi**: 20 triệu bước mỗi `run()` — chống `while true` vô hạn. Thuật toán nặng (Sudoku, ma trận) có thể tăng bằng `KINET_MAX_STEPS=200000000`. Rao `20000000` bước thường do **tree-walking + copy list** — tối ưu cấu trúc dữ liệu hoặc tăng ngân sách.
 - **`range()`**: tối đa 2 triệu phần tử.
 - **Import** an toàn: chặn import vòng (A→B→A), file lỗi không bị đánh dấu "đã nạp" (import lại sau khi sửa vẫn chạy).
 - **Scope nhất quán**: `if`/`while`/`for`/`match` đều tạo scope riêng — `let` trong block không rò ra ngoài; còn gán `=` vào biến ngoài thì vẫn được.

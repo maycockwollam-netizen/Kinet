@@ -52,6 +52,7 @@ impl Parser {
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
+            TokenKind::Throw => self.throw_stmt(),
             TokenKind::Import => self.import_stmt(),
             TokenKind::Try => self.try_stmt(),
             TokenKind::Break => {
@@ -129,6 +130,13 @@ impl Parser {
         };
         self.expect_semi("import")?;
         Ok(Stmt::Import(path))
+    }
+
+    fn throw_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // throw
+        let expr = self.expression()?;
+        self.expect_semi("throw")?;
+        Ok(Stmt::Throw(expr))
     }
 
     fn try_stmt(&mut self) -> Result<Stmt, String> {
@@ -221,14 +229,25 @@ impl Parser {
     fn assignment(&mut self) -> Result<Expr, String> {
         let left = self.or()?;
         if self.match_or(TokenKind::Assign) {
+            let value = self.assignment()?;
+            // a = v
             if let Expr::Variable(name) = left {
-                let value = self.assignment()?;
                 return Ok(Expr::Assign {
                     name,
                     value: Box::new(value),
                 });
             }
-            return Err(self.error("vế trái của '=' phải là biến".to_string()));
+            // arr[i] = v / grid[r][c] = v / m["k"] = v
+            if let Some((name, indices)) = flatten_index(&left) {
+                return Ok(Expr::IndexAssign {
+                    name: name.to_string(),
+                    indices,
+                    value: Box::new(value),
+                });
+            }
+            return Err(self.error(
+                "vế trái của '=' phải là biến hoặc mục lấy theo chỉ số (a[i] / m[\"k\"])".to_string(),
+            ));
         }
         Ok(left)
     }
@@ -248,6 +267,14 @@ impl Parser {
     fn comparison(&mut self) -> Result<Expr, String> {
         self.left_assoc_binary(
             &[TokenKind::Lt, TokenKind::Gt, TokenKind::Le, TokenKind::Ge],
+            Self::bitwise,
+        )
+    }
+
+    // << >> & | (cùng bậc, kết hợp trái).
+    fn bitwise(&mut self) -> Result<Expr, String> {
+        self.left_assoc_binary(
+            &[TokenKind::Shl, TokenKind::Shr, TokenKind::Band, TokenKind::Bor],
             Self::term,
         )
     }
@@ -290,6 +317,14 @@ impl Parser {
                 callee = Expr::Call {
                     callee: Box::new(callee),
                     args,
+                };
+            } else if self.match_or(TokenKind::LBracket) {
+                // arr[i] / m["k"] / grid[r][c] — chỉ số có thể là biểu thức bất kỳ.
+                let index = self.expression()?;
+                self.consume(TokenKind::RBracket, "mong đợi ']' sau chỉ số")?;
+                callee = Expr::Index {
+                    target: Box::new(callee),
+                    index: Box::new(index),
                 };
             } else {
                 break;
@@ -642,6 +677,19 @@ fn split_template(contents: &str) -> Result<Vec<(bool, String)>, String> {
         parts.push((false, restore_dollar(&literal)));
     }
     Ok(parts)
+}
+
+/// Tách vế trái `name[i][j]...` thành tên biến gốc + danh sách chỉ số.
+fn flatten_index(expr: &Expr) -> Option<(&str, Vec<Expr>)> {
+    match expr {
+        Expr::Variable(name) => Some((name, Vec::new())),
+        Expr::Index { target, index } => {
+            let (name, mut indices) = flatten_index(target)?;
+            indices.push((**index).clone());
+            Some((name, indices))
+        }
+        _ => None,
+    }
 }
 
 /// Hoàn trả sentinel (do `\$`) về `$` khi tạo giá trị chuỗi thật.

@@ -243,6 +243,11 @@ fn annotate_stack(mut err: String, fn_name: &str, line: Option<usize>) -> String
 
 impl Interpreter {
     pub fn new() -> Self {
+        // Cho phép tăng ngân sách thực thi qua env (chạy thuật toán nặng).
+        let max_steps = std::env::var("KINET_MAX_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_STEPS);
         let globals = std::rc::Rc::new(std::cell::RefCell::new(Env::new()));
         // Hàm dựng sẵn (native) có sẵn cho mọi chương trình.
         {
@@ -287,7 +292,7 @@ impl Interpreter {
             globals,
             call_depth: 0,
             steps: 0,
-            max_steps: DEFAULT_MAX_STEPS,
+            max_steps,
             current_line: None,
             imported: HashSet::new(),
             loading: HashSet::new(),
@@ -500,6 +505,11 @@ impl Interpreter {
                 let v = self.eval(e, env)?;
                 Ok(Flow::Return(v))
             }
+            Stmt::Throw(e) => {
+                // Tạo lỗi runtime — try/catch hoặc báo ra ngoài (kèm số dòng).
+                let v = self.eval(e, env)?;
+                Err(self.to_string(&v))
+            }
         }
     }
 
@@ -554,6 +564,43 @@ impl Interpreter {
                     arg_values.push(self.eval(a, env.clone())?);
                 }
                 self.call(func, arg_values)
+            }
+            Expr::Index { target, index } => {
+                let container = self.eval(target, env.clone())?;
+                let idx = self.eval(index, env)?;
+                self.index_get(&container, &idx)
+            }
+            Expr::IndexAssign {
+                name,
+                indices,
+                value,
+            } => {
+                let root = env.borrow().get(name)?;
+                if indices.is_empty() {
+                    let v = self.eval(value, env.clone())?;
+                    env.borrow_mut().assign(name, v.clone())?;
+                    return Ok(v);
+                }
+                // Đi sâu tới "cha" của lá, nhớ lại các container dọc đường.
+                let mut stack: Vec<Value> = Vec::new();
+                let mut current = root;
+                for idx in &indices[..indices.len() - 1] {
+                    let iv = self.eval(idx, env.clone())?;
+                    let next = self.index_get(&current, &iv)?;
+                    stack.push(current);
+                    current = next;
+                }
+                let last_iv = self.eval(indices.last().unwrap(), env.clone())?;
+                let new_val = self.eval(value, env.clone())?;
+                let mut rebuilt = self.index_set(&current, &last_iv, new_val)?;
+                // Dựng ngược lại các lớp, rồi gán về biến gốc.
+                for idx in indices[..indices.len() - 1].iter().rev() {
+                    let container = stack.pop().unwrap();
+                    let iv = self.eval(idx, env.clone())?;
+                    rebuilt = self.index_set(&container, &iv, rebuilt)?;
+                }
+                env.borrow_mut().assign(name, rebuilt.clone())?;
+                Ok(rebuilt)
             }
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -656,8 +703,42 @@ impl Interpreter {
             TokenKind::Gt => self.cmp_values(&lv, &rv, op),
             TokenKind::Le => self.cmp_values(&lv, &rv, op),
             TokenKind::Ge => self.cmp_values(&lv, &rv, op),
+            TokenKind::Band => self.bitop(&lv, &rv, op),
+            TokenKind::Bor => self.bitop(&lv, &rv, op),
+            TokenKind::Shl => self.bitop(&lv, &rv, op),
+            TokenKind::Shr => self.bitop(&lv, &rv, op),
             _ => unreachable!(),
         }
+    }
+
+    // Phép bit: chỉ số nguyên, có check dịch chuyển vượt 63 bit.
+    fn bitop(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
+        let (Value::Int(a), Value::Int(b)) = (l, r) else {
+            return Err(format!(
+                "Toán tử '{}' cần hai số nguyên",
+                self.op_symbol(op)
+            ));
+        };
+        let result = match op {
+            TokenKind::Band => a & b,
+            TokenKind::Bor => a | b,
+            TokenKind::Shl => {
+                let n = *b as u32;
+                if *b < 0 || n >= 64 {
+                    return Err("dịch trái quá 63 bit".to_string());
+                }
+                a << n
+            }
+            TokenKind::Shr => {
+                let n = *b as u32;
+                if *b < 0 || n >= 64 {
+                    return Err("dịch phải quá 63 bit".to_string());
+                }
+                a >> n
+            }
+            _ => unreachable!(),
+        };
+        Ok(Value::Int(result))
     }
 
     // Số học: int+int → int (checked), có float → float.
@@ -726,6 +807,53 @@ impl Interpreter {
         }
     }
 
+    // Đọc phần tử: list theo chỉ số int, map theo khóa.
+    fn index_get(&self, container: &Value, idx: &Value) -> Result<Value, String> {
+        match container {
+            Value::List(items) => {
+                let i = expect_index(idx)?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(format!(
+                        "chỉ số {} ngoài phạm vi list (len={})",
+                        i,
+                        items.len()
+                    ));
+                }
+                Ok(items[i as usize].clone())
+            }
+            Value::Map(entries) => entries.get(idx).cloned().ok_or_else(|| {
+                "map không có khóa này".to_string()
+            }),
+            _ => Err("chỉ số `[]` chỉ áp dụng cho list hoặc map".to_string()),
+        }
+    }
+
+    // Ghi phần tử (bản sao cập nhật); dùng cho `arr[i] = v`.
+    fn index_set(&self, container: &Value, idx: &Value, val: Value) -> Result<Value, String> {
+        match container {
+            Value::List(items) => {
+                let i = expect_index(idx)?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(format!(
+                        "chỉ số {} ngoài phạm vi list (len={})",
+                        i,
+                        items.len()
+                    ));
+                }
+                let mut out = items.clone();
+                out[i as usize] = val;
+                Ok(Value::List(out))
+            }
+            Value::Map(entries) => {
+                check_len("map", entries.len() + 1, MAX_LIST_LEN)?;
+                let mut out = entries.clone();
+                out.insert(idx.clone(), val);
+                Ok(Value::Map(out))
+            }
+            _ => Err("chỉ số `[]` chỉ áp dụng cho list hoặc map".to_string()),
+        }
+    }
+
     // So sánh số (int/float); chuỗi/khác kiểu không so bằng < > được.
     fn cmp_values(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
         let result = if let (Value::Int(a), Value::Int(b)) = (l, r) {
@@ -761,6 +889,10 @@ impl Interpreter {
             TokenKind::Gt => ">",
             TokenKind::Le => "<=",
             TokenKind::Ge => ">=",
+            TokenKind::Shl => "<<",
+            TokenKind::Shr => ">>",
+            TokenKind::Band => "&",
+            TokenKind::Bor => "|",
             _ => "?",
         }
     }
@@ -1378,6 +1510,14 @@ fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
     match v {
         Value::Int(n) => Ok(*n),
         _ => Err(format!("{}() cần đối số là số nguyên", fname)),
+    }
+}
+
+fn expect_index(v: &Value) -> Result<i64, String> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
+        _ => Err("chỉ số `[]` cần số nguyên".to_string()),
     }
 }
 
@@ -2252,6 +2392,65 @@ mod tests {
             Value::List(vec![Value::Str("a.txt".into()), Value::Str("b.txt".into())])
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- index [] / throw / bitwise / \r -----
+
+    #[test]
+    fn index_read_and_write() {
+        let src = "let a = [10, 20, 30]; let x = a[1]; a[1] = 99; let y = a[1]; let n = a[0];";
+        assert_eq!(run_and_get(src, "x"), Value::Int(20));
+        assert_eq!(run_and_get(src, "y"), Value::Int(99));
+        assert_eq!(run_and_get(src, "n"), Value::Int(10));
+    }
+
+    #[test]
+    fn index_nested_grid_write() {
+        let src = "let g = [[1, 2], [3, 4]]; g[1][0] = 9; let v = g[1][0];";
+        assert_eq!(run_and_get(src, "v"), Value::Int(9));
+    }
+
+    #[test]
+    fn index_map_write_read() {
+        let src = r#"let m = { "a": 1 }; let before = m["a"]; m["b"] = 2; let b = m["b"]; let has = contains(m, "b");"#;
+        assert_eq!(run_and_get(src, "before"), Value::Int(1));
+        assert_eq!(run_and_get(src, "b"), Value::Int(2));
+        assert_eq!(run_and_get(src, "has"), Value::Bool(true));
+    }
+
+    #[test]
+    fn index_out_of_range_errors() {
+        let err = run("let a = [1]; let x = a[5];").unwrap_err();
+        assert!(err.contains("ngoài phạm vi"));
+    }
+
+    #[test]
+    fn throw_caught_by_try() {
+        let src = r#"let msg = ""; try { throw "có lỗi XYZ"; } catch e { msg = e; }"#;
+        let msg = run_and_get(src, "msg");
+        let Value::Str(s) = msg else {
+            panic!("mong đợi chuỗi, gặp {:?}", msg);
+        };
+        assert!(s.contains("XYZ"));
+    }
+
+    #[test]
+    fn throw_uncaught_errors() {
+        let err = run(r#"throw "đầu hàng";"#).unwrap_err();
+        assert!(err.contains("đầu hàng"));
+    }
+
+    #[test]
+    fn bitwise_ops() {
+        assert_eq!(run_and_get("let x = 6 & 3;", "x"), Value::Int(2));
+        assert_eq!(run_and_get("let x = 4 | 1;", "x"), Value::Int(5));
+        assert_eq!(run_and_get("let x = 1 << 4;", "x"), Value::Int(16));
+        assert_eq!(run_and_get("let x = 16 >> 2;", "x"), Value::Int(4));
+    }
+
+    #[test]
+    fn escape_carriage_return() {
+        assert_eq!(run_and_get(r#"let x = len("a\rb");"#, "x"), Value::Int(3));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub enum TokenKind {
     For,
     In,
     Return,
+    Throw,
     Break,
     Continue,
     Import,
@@ -50,6 +51,10 @@ pub enum TokenKind {
     Gt,     // >
     Le,     // <=
     Ge,     // >=
+    Shl,    // <<
+    Shr,    // >>
+    Band,   // &
+    Bor,    // |
     Arrow,  // =>
 
     // Punctuation
