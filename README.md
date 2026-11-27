@@ -181,4 +181,9 @@ Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
 - [x] **Bảo mật & độ chắc:** ngân sách thực thi (chống `while true`), cap `range()`, `return;`, scope nhất quán, sandbox file I/O qua `KINET_SANDBOX_ROOT`, sửa overflow `range`/`substring`, `list_join` đúng chuỗi
 - [x] **Template chuỗi `${x}` + Lambda + Import** (Giai đoạn A xong; mở Phase B)
 - [x] **Audit v3:** sandbox mặc định bật (chống `..`, path tuyệt đối, symlink), trần bộ nhớ (chuỗi/list/map), `\$` escape, range checked_sub, import chống vòng + không nhớ lỗi
+- [x] **Dọn nợ:** stack trace CÓ SỐ DÒNG (`Lỗi dòng N` + `tại hàm x (dòng M)`), map chuyển `IndexMap` (tra cứu O(1))
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
+
+### Ghi chú thiết kế (đã cân nhắc, không phải bug cấp bách)
+- **`case x =>`** luôn là pattern **binding** (bắt giá trị vào biến x), không so sánh với biến x đã có — tránh bẫy, hãy dùng `case` với literal hoặc `_`/`default`. Nếu cần so sánh với biến đã có, đặt literal/vế so sánh: `case "giá_trị_mong_muốn" => ...`.
+- **Lỗi là chuỗi** (chưa phải struct): stack trace ghép chuỗi; trong thực tế hiếm khi người dùng in nội dung chứa đúng `"↳ tại hàm"`. Refactor sang struct là một thay đổi rộng, để khi cần nâng cấp hệ thống lỗi (throw/catch).
