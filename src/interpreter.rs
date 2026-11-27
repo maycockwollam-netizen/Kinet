@@ -59,6 +59,64 @@ pub struct NativeFunc {
     pub func: fn(&[Value]) -> Result<Value, String>,
 }
 
+/// Bảng hàm dựng sẵn — dùng chung cho interpreter (globals) và VM.
+pub fn native_table() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)> {
+    vec![
+        ("len", native_len as fn(&[Value]) -> Result<Value, String>),
+        ("get", native_get as fn(&[Value]) -> Result<Value, String>),
+        ("contains", native_contains as fn(&[Value]) -> Result<Value, String>),
+        ("append", native_append as fn(&[Value]) -> Result<Value, String>),
+        ("range", native_range as fn(&[Value]) -> Result<Value, String>),
+        ("split", native_split as fn(&[Value]) -> Result<Value, String>),
+        ("starts_with", native_starts_with as fn(&[Value]) -> Result<Value, String>),
+        ("ends_with", native_ends_with as fn(&[Value]) -> Result<Value, String>),
+        ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
+        ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
+        ("map_set", native_map_set as fn(&[Value]) -> Result<Value, String>),
+        ("map_keys", native_map_keys as fn(&[Value]) -> Result<Value, String>),
+        ("map_remove", native_map_remove as fn(&[Value]) -> Result<Value, String>),
+        ("read_file", native_read_file as fn(&[Value]) -> Result<Value, String>),
+        ("write_file", native_write_file as fn(&[Value]) -> Result<Value, String>),
+        ("exists", native_exists as fn(&[Value]) -> Result<Value, String>),
+        ("append_file", native_append_file as fn(&[Value]) -> Result<Value, String>),
+        ("list_dir", native_list_dir as fn(&[Value]) -> Result<Value, String>),
+        ("read_lines", native_read_lines as fn(&[Value]) -> Result<Value, String>),
+        ("args", native_args as fn(&[Value]) -> Result<Value, String>),
+        ("get_env", native_get_env as fn(&[Value]) -> Result<Value, String>),
+        ("sleep", native_sleep as fn(&[Value]) -> Result<Value, String>),
+        ("input_line", native_input_line as fn(&[Value]) -> Result<Value, String>),
+        ("assert", native_assert as fn(&[Value]) -> Result<Value, String>),
+        ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
+        ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
+        ("to_float", native_to_float as fn(&[Value]) -> Result<Value, String>),
+        ("str", native_str as fn(&[Value]) -> Result<Value, String>),
+        ("round", native_round as fn(&[Value]) -> Result<Value, String>),
+        ("floor", native_floor as fn(&[Value]) -> Result<Value, String>),
+        ("ceil", native_ceil as fn(&[Value]) -> Result<Value, String>),
+        ("abs", native_abs as fn(&[Value]) -> Result<Value, String>),
+        ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
+        ("substring", native_substring as fn(&[Value]) -> Result<Value, String>),
+        ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
+        ("to_lower", native_to_lower as fn(&[Value]) -> Result<Value, String>),
+        ("list_join", native_list_join as fn(&[Value]) -> Result<Value, String>),
+        ("enumerate", native_enumerate as fn(&[Value]) -> Result<Value, String>),
+        ("zip", native_zip as fn(&[Value]) -> Result<Value, String>),
+        ("sorted", native_sorted as fn(&[Value]) -> Result<Value, String>),
+        ("reversed", native_reversed as fn(&[Value]) -> Result<Value, String>),
+        ("sum", native_sum as fn(&[Value]) -> Result<Value, String>),
+        ("min", native_min as fn(&[Value]) -> Result<Value, String>),
+        ("max", native_max as fn(&[Value]) -> Result<Value, String>),
+        ("any", native_any as fn(&[Value]) -> Result<Value, String>),
+        ("all", native_all as fn(&[Value]) -> Result<Value, String>),
+        ("set_add", native_set_add as fn(&[Value]) -> Result<Value, String>),
+        ("set_remove", native_set_remove as fn(&[Value]) -> Result<Value, String>),
+        ("set_union", native_set_union as fn(&[Value]) -> Result<Value, String>),
+        // map/filter là higher-order: intercept trong Interpreter::call.
+        ("map", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
+        ("filter", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
+    ]
+}
+
 // So sánh hàm chỉ dựa trên tên (closure chứa Env không so sánh được).
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
@@ -269,7 +327,7 @@ const STACK_MARKER: &str = "  ↳ tại hàm ";
 // Giới hạn số frame hiển thị để tránh phình khi đệ quy sâu.
 const MAX_STACK_FRAMES: usize = 30;
 // Ngân sách mặc định: số câu lệnh tối đa mỗi lần run() (chống vòng lặp vô hạn).
-const DEFAULT_MAX_STEPS: u64 = 20_000_000;
+pub const DEFAULT_MAX_STEPS: u64 = 20_000_000;
 // Giới hạn số phần tử tối đa mà range() được phép tạo (chống ăn hết RAM).
 const MAX_RANGE_LEN: i64 = 2_000_000;
 // Trần bộ nhớ cho chuỗi (ký tự) và list/map (phần tử) — chống phình RAM.
@@ -320,60 +378,7 @@ impl Interpreter {
         // Hàm dựng sẵn (native) có sẵn cho mọi chương trình.
         {
             let mut g = globals.borrow_mut();
-            for (name, func) in [
-                ("len", native_len as fn(&[Value]) -> Result<Value, String>),
-                ("get", native_get as fn(&[Value]) -> Result<Value, String>),
-                ("contains", native_contains as fn(&[Value]) -> Result<Value, String>),
-                ("append", native_append as fn(&[Value]) -> Result<Value, String>),
-                ("range", native_range as fn(&[Value]) -> Result<Value, String>),
-                ("split", native_split as fn(&[Value]) -> Result<Value, String>),
-                ("starts_with", native_starts_with as fn(&[Value]) -> Result<Value, String>),
-                ("ends_with", native_ends_with as fn(&[Value]) -> Result<Value, String>),
-                ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
-                ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
-                ("map_set", native_map_set as fn(&[Value]) -> Result<Value, String>),
-                ("map_keys", native_map_keys as fn(&[Value]) -> Result<Value, String>),
-                ("map_remove", native_map_remove as fn(&[Value]) -> Result<Value, String>),
-                ("read_file", native_read_file as fn(&[Value]) -> Result<Value, String>),
-                ("write_file", native_write_file as fn(&[Value]) -> Result<Value, String>),
-                ("exists", native_exists as fn(&[Value]) -> Result<Value, String>),
-                ("append_file", native_append_file as fn(&[Value]) -> Result<Value, String>),
-                ("list_dir", native_list_dir as fn(&[Value]) -> Result<Value, String>),
-                ("read_lines", native_read_lines as fn(&[Value]) -> Result<Value, String>),
-                ("args", native_args as fn(&[Value]) -> Result<Value, String>),
-                ("get_env", native_get_env as fn(&[Value]) -> Result<Value, String>),
-                ("sleep", native_sleep as fn(&[Value]) -> Result<Value, String>),
-                ("input_line", native_input_line as fn(&[Value]) -> Result<Value, String>),
-                ("assert", native_assert as fn(&[Value]) -> Result<Value, String>),
-                ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
-                ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
-                ("to_float", native_to_float as fn(&[Value]) -> Result<Value, String>),
-                ("str", native_str as fn(&[Value]) -> Result<Value, String>),
-                ("round", native_round as fn(&[Value]) -> Result<Value, String>),
-                ("floor", native_floor as fn(&[Value]) -> Result<Value, String>),
-                ("ceil", native_ceil as fn(&[Value]) -> Result<Value, String>),
-                ("abs", native_abs as fn(&[Value]) -> Result<Value, String>),
-                ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
-                ("substring", native_substring as fn(&[Value]) -> Result<Value, String>),
-                ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
-                ("to_lower", native_to_lower as fn(&[Value]) -> Result<Value, String>),
-                ("list_join", native_list_join as fn(&[Value]) -> Result<Value, String>),
-                ("enumerate", native_enumerate as fn(&[Value]) -> Result<Value, String>),
-                ("zip", native_zip as fn(&[Value]) -> Result<Value, String>),
-                ("sorted", native_sorted as fn(&[Value]) -> Result<Value, String>),
-                ("reversed", native_reversed as fn(&[Value]) -> Result<Value, String>),
-                ("sum", native_sum as fn(&[Value]) -> Result<Value, String>),
-                ("min", native_min as fn(&[Value]) -> Result<Value, String>),
-                ("max", native_max as fn(&[Value]) -> Result<Value, String>),
-                ("any", native_any as fn(&[Value]) -> Result<Value, String>),
-                ("all", native_all as fn(&[Value]) -> Result<Value, String>),
-                ("set_add", native_set_add as fn(&[Value]) -> Result<Value, String>),
-                ("set_remove", native_set_remove as fn(&[Value]) -> Result<Value, String>),
-                ("set_union", native_set_union as fn(&[Value]) -> Result<Value, String>),
-                // map/filter là higher-order: intercept trong Interpreter::call.
-                ("map", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
-                ("filter", native_higher_order_stub as fn(&[Value]) -> Result<Value, String>),
-            ] {
+            for (name, func) in native_table() {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
         }
@@ -1946,7 +1951,7 @@ fn seq_values(v: &Value) -> Result<Vec<Value>, String> {
 }
 
 // So sánh số (int/float) hoặc chuỗi — dùng cho sorted/min/max.
-fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
+pub fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).ok_or_else(|| "NaN không so sánh được".to_string()),
@@ -2640,7 +2645,7 @@ fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
     }
 }
 
-fn expect_index(v: &Value) -> Result<i64, String> {
+pub fn expect_index(v: &Value) -> Result<i64, String> {
     match v {
         Value::Int(n) => Ok(*n),
         Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
@@ -2687,7 +2692,7 @@ fn set_struct_field(v: &Value, name: &str, val: Value) -> Result<Value, String> 
 }
 
 /// Chuyển chỉ số sang usize; chỉ số âm đếm từ cuối như Python. Lỗi nếu ngoài phạm vi.
-fn expect_and_normalize_index(v: &Value, len: usize) -> Result<usize, String> {
+pub fn expect_and_normalize_index(v: &Value, len: usize) -> Result<usize, String> {
     let raw = expect_index(v)?;
     let n = len as i64;
     let normalized = if raw < 0 { raw + n } else { raw };
@@ -2875,7 +2880,7 @@ fn canonicalize_loose(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Chuẩn truthiness dùng chung (0/""/[]/{} rỗng là false).
-fn is_truthy_value(v: &Value) -> bool {
+pub fn is_truthy_value(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
         Value::Nil => false,
@@ -2902,7 +2907,7 @@ fn format_float(f: f64) -> String {
     }
 }
 
-fn stringify_value(v: &Value) -> String {
+pub fn stringify_value(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => format_float(*f),

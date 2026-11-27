@@ -6,12 +6,14 @@
 //!   cargo run -- -e "code"       → chạy code từ tham số
 //!   cargo run -- --tokens file   → xem danh sách token (Lexer)
 //!   cargo run -- --ast file      → xem cây cú pháp (Parser)
+//!   cargo run -- --vm file       → chạy bằng bytecode VM (phase 1)
 
 mod ast;
 mod interpreter;
 mod lexer;
 mod parser;
 mod token;
+mod vm;
 
 use std::env;
 use std::fs;
@@ -63,6 +65,13 @@ fn run_all() -> ExitCode {
             ExitCode::FAILURE
         } else {
             cmd_ast(&args[1])
+        }
+    } else if args[0] == "--vm" {
+        if args.len() < 2 {
+            eprintln!("Cần file sau '--vm'");
+            ExitCode::FAILURE
+        } else {
+            cmd_vm(&args[1])
         }
     } else {
         match fs::read_to_string(&args[0]) {
@@ -131,6 +140,33 @@ fn cmd_ast(path: &str) -> ExitCode {
             print!("{}", out);
             ExitCode::SUCCESS
         }
+        Err(e) => {
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--vm`: chạy bằng bytecode VM (phase 1 — phần lõi + đệ quy sâu).
+fn cmd_vm(path: &str) -> ExitCode {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Không đọc được file '{}': {}", path, e);
+            return ExitCode::FAILURE;
+        }
+    };
+    match Lexer::new(&source)
+        .tokenize()
+        .and_then(|t| Parser::new(t).parse())
+    {
+        Ok(stmts) => match vm::run(&stmts) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{}", e);
+                ExitCode::FAILURE
+            }
+        },
         Err(e) => {
             eprintln!("{}", e);
             ExitCode::FAILURE

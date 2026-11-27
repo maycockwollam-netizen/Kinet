@@ -77,7 +77,9 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 ## 🟠 GIAI ĐOẠN C — "Hiệu năng & công cụ" (chạy nhanh, xài mượt)
 
 ### C1 — Bytecode / VM  (≈ 1–2 tháng)
-- [ ] Biên dịch AST → bytecode, VM loop thay vì tree-walking
+- [x] **Phase 1**: biên dịch AST → bytecode + VM loop với call stack tường minh trên heap —
+      đệ quy sâu không tràn stack (thử: `--vm` tính được `sumto(100000)`) (2026-11-27)
+- [ ] Phase 2+: struct, closure/upvalue, try/with/match, magic, slice, comprehension
 - [ ] Đo benchmark, tối ưu hot path
 
 ### C3 — Tooling  (≈ 2–3 tuần)
