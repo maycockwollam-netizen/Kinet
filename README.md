@@ -111,6 +111,11 @@ println(a[1], m["y"]);         // đọc mục — kể cả lồng: grid[r][c]
 | `append_file(p, s)` | ghi THÊM vào file | `append_file("log.txt", "x")` |
 | `list_dir(p)` | liệt kê tên file (sắp xếp) | `list_dir(".")` |
 | `read_lines(s)` | chuỗi → list dòng | `read_lines("a\nb")` → `["a","b"]` |
+| `args()` | tham số dòng lệnh (bỏ tên binary) | `args()[1]` |
+| `get_env(name)` | biến môi trường ("" nếu thiếu) | `get_env("PATH")` |
+| `sleep(ms)` | tạm dừng mili giây | `sleep(1000)` |
+| `input_line()` | đọc 1 dòng từ stdin | `let t = input_line();` |
+| `assert(x, msg?)` | kiểm tra điều kiện (lỗi nếu sai) | `assert(x > 0, "phải dương")` |
 | `substring(s, start, len)` | cắt chuỗi | `substring("hello", 1, 3)` → `"ell"` |
 | `to_upper(s)` / `to_lower(s)` | viết hoa / thường | `to_upper("ab")` → `"AB"` |
 | `list_join(list, sep)` | nối list thành chuỗi | `list_join(["a","b"], "-")` → `"a-b"` |
@@ -132,6 +137,7 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 - Bit: `& | << >>` (chỉ số nguyên)
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)
 - Phép gán: `=` `a[i] = v` `m["k"] = v`
+- **`if` là biểu thức**: `let x = if ok { 1 } else { 2 };` (hỗ trợ `else if` lồng)
 
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 

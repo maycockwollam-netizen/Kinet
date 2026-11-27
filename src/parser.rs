@@ -357,6 +357,10 @@ impl Parser {
                 // primary() đã ăn token 'func' — hàm ẩn danh (lambda) trong biểu thức.
                 self.lambda_expr()
             }
+            TokenKind::If => {
+                // primary() đã ăn token 'if' — if TRẢ GIÁ TRỊ trong biểu thức.
+                self.if_expr_after_if()
+            }
             TokenKind::Match => self.match_expr(),
             TokenKind::LBracket => {
                 let mut items = Vec::new();
@@ -403,6 +407,35 @@ impl Parser {
         }
         self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
         Ok(Expr::Dict(entries))
+    }
+
+    fn if_expr_after_if(&mut self) -> Result<Expr, String> {
+        // 'if' đã được ăn. Cú pháp: if cond { giá trị } else { giá trị }
+        let cond = self.expression()?;
+        let then_expr = self.if_branch()?;
+        let mut else_expr = Expr::Nil;
+        if self.match_or(TokenKind::Else) {
+            if self.check(&TokenKind::If) {
+                // else if ...
+                self.advance();
+                else_expr = self.if_expr_after_if()?;
+            } else {
+                else_expr = self.if_branch()?;
+            }
+        }
+        Ok(Expr::If {
+            cond: Box::new(cond),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
+    }
+
+    // Một nhánh `{ biểu thức }` trả giá trị.
+    fn if_branch(&mut self) -> Result<Expr, String> {
+        self.consume(TokenKind::LBrace, "mong đợi '{' trong nhánh if trả giá trị")?;
+        let e = self.expression()?;
+        self.consume(TokenKind::RBrace, "mong đợi '}' sau nhánh if")?;
+        Ok(e)
     }
 
     fn lambda_expr(&mut self) -> Result<Expr, String> {

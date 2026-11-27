@@ -273,6 +273,19 @@ fn p_exprs(exprs: &[Expr], indent: usize, out: &mut String) {
 
 fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
     match expr {
+        Expr::If {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            out.push_str("if ");
+            p_expr(cond, indent + 1, out);
+            out.push_str(" { ");
+            p_expr(then_expr, indent + 1, out);
+            out.push_str(" } else { ");
+            p_expr(else_expr, indent + 1, out);
+            out.push_str(" }");
+        }
         Expr::Number(n) => out.push_str(&n.to_string()),
         Expr::Float(f) => out.push_str(&format!("{}", f)),
         Expr::Str(s) => out.push_str(&format!("\"{}\"", s)),

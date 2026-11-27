@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{BufRead, Write};
 
 use indexmap::IndexMap;
 
@@ -272,6 +272,11 @@ impl Interpreter {
                 ("append_file", native_append_file as fn(&[Value]) -> Result<Value, String>),
                 ("list_dir", native_list_dir as fn(&[Value]) -> Result<Value, String>),
                 ("read_lines", native_read_lines as fn(&[Value]) -> Result<Value, String>),
+                ("args", native_args as fn(&[Value]) -> Result<Value, String>),
+                ("get_env", native_get_env as fn(&[Value]) -> Result<Value, String>),
+                ("sleep", native_sleep as fn(&[Value]) -> Result<Value, String>),
+                ("input_line", native_input_line as fn(&[Value]) -> Result<Value, String>),
+                ("assert", native_assert as fn(&[Value]) -> Result<Value, String>),
                 ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
                 ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
                 ("to_float", native_to_float as fn(&[Value]) -> Result<Value, String>),
@@ -524,6 +529,18 @@ impl Interpreter {
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
+            Expr::If {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let c = self.eval(cond, env.clone())?;
+                if self.truthy(&c) {
+                    self.eval(then_expr, env)
+                } else {
+                    self.eval(else_expr, env)
+                }
+            }
             Expr::Lambda { params, body } => Ok(Value::Func(FuncDef {
                 name: "<lambda>".to_string(),
                 params: params.clone(),
@@ -1012,16 +1029,7 @@ impl Interpreter {
     // Chuẩn Python: 0, chuỗi rỗng, list rỗng là falsy — quan trọng cho agent
     // đọc exit code: `if exit_code` phải đúng nghĩa "code khác 0".
     fn truthy(&self, v: &Value) -> bool {
-        match v {
-            Value::Bool(b) => *b,
-            Value::Nil => false,
-            Value::Int(n) => *n != 0,
-            Value::Float(f) => *f != 0.0,
-            Value::Str(s) => !s.is_empty(),
-            Value::List(items) => !items.is_empty(),
-            Value::Map(entries) => !entries.is_empty(),
-            _ => true,
-        }
+        is_truthy_value(v)
     }
 
     fn to_string(&self, v: &Value) -> String {
@@ -1433,6 +1441,66 @@ fn native_read_lines(args: &[Value]) -> Result<Value, String> {
     Ok(Value::List(lines))
 }
 
+fn native_args(_args: &[Value]) -> Result<Value, String> {
+    // Bỏ tên binary; [0] = file đang chạy, [1..] = tham số người dùng.
+    let list: Vec<Value> = std::env::args().skip(1).map(Value::Str).collect();
+    Ok(Value::List(list))
+}
+
+fn native_get_env(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("get_env() cần 1 đối số (tên biến)".to_string());
+    }
+    let Value::Str(name) = &args[0] else {
+        return Err("get_env() cần chuỗi tên biến".to_string());
+    };
+    Ok(Value::Str(std::env::var(name).unwrap_or_default()))
+}
+
+fn native_sleep(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("sleep() cần 1 đối số (mili giây)".to_string());
+    }
+    let Value::Int(ms) = args[0] else {
+        return Err("sleep() cần số nguyên mili giây".to_string());
+    };
+    if ms < 0 {
+        return Err("sleep() cần mili giây không âm".to_string());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    Ok(Value::Nil)
+}
+
+fn native_input_line(args: &[Value]) -> Result<Value, String> {
+    if !args.is_empty() {
+        return Err("input_line() không nhận đối số".to_string());
+    }
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("input_line() lỗi: {}", e))?;
+    if n == 0 {
+        return Ok(Value::Nil); // hết dữ liệu (EOF)
+    }
+    Ok(Value::Str(line.trim_end_matches(['\r', '\n']).to_string()))
+}
+
+fn native_assert(args: &[Value]) -> Result<Value, String> {
+    if args.len() < 1 || args.len() > 2 {
+        return Err("assert() cần 1-2 đối số (điều kiện, thông điệp?)".to_string());
+    }
+    if !is_truthy_value(&args[0]) {
+        let msg = if args.len() == 2 {
+            stringify_value(&args[1])
+        } else {
+            "điều kiện sai".to_string()
+        };
+        return Err(format!("Assert thất bại: {}", msg));
+    }
+    Ok(Value::Bool(true))
+}
+
 fn native_range(args: &[Value]) -> Result<Value, String> {
     if args.len() < 2 || args.len() > 3 {
         return Err("range() cần 2-3 đối số (start, end[, step])".to_string());
@@ -1686,6 +1754,20 @@ fn canonicalize_loose(path: &std::path::Path) -> std::path::PathBuf {
                 None => return path.to_path_buf(),
             },
         }
+    }
+}
+
+/// Chuẩn truthiness dùng chung (0/""/[]/{} rỗng là false).
+fn is_truthy_value(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Nil => false,
+        Value::Int(n) => *n != 0,
+        Value::Float(f) => *f != 0.0,
+        Value::Str(s) => !s.is_empty(),
+        Value::List(items) => !items.is_empty(),
+        Value::Map(entries) => !entries.is_empty(),
+        _ => true,
     }
 }
 
@@ -2548,6 +2630,48 @@ mod tests {
         assert_eq!(run_and_get("let x = ceil(2.1);", "x"), Value::Int(3));
         assert_eq!(run_and_get("let x = abs(-7);", "x"), Value::Int(7));
         assert_eq!(run_and_get("let x = abs(-2.5);", "x"), Value::Float(2.5));
+    }
+
+    // ----- if biểu thức + assert -----
+
+    #[test]
+    fn if_as_expression() {
+        assert_eq!(
+            run_and_get(r#"let x = if 5 > 3 { "lon" } else { "be" };"#, "x"),
+            Value::Str("lon".into())
+        );
+        assert_eq!(
+            run_and_get(r#"let x = if 5 > 9 { 1 } else if 5 > 4 { 2 } else { 3 };"#, "x"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            run_and_get(r#"let x = if false { 1 } else { 2 };"#, "x"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn if_expr_in_lambda_and_map() {
+        assert_eq!(
+            run_and_get(
+                r#"let r = map([1, 2, 3, 4], func(n) { return if n % 2 == 0 { "chẵn" } else { "lẻ" }; });"#,
+                "r"
+            ),
+            Value::List(vec![
+                Value::Str("lẻ".into()),
+                Value::Str("chẵn".into()),
+                Value::Str("lẻ".into()),
+                Value::Str("chẵn".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn assert_ok_and_fail() {
+        run("assert(1 + 1 == 2);").unwrap();
+        run("assert(\"abc\", \"chuỗi rỗng mới false\");").unwrap();
+        let err = run(r#"assert(1 == 2, "sai rồi");"#).unwrap_err();
+        assert!(err.contains("sai rồi"), "lỗi lạ: {}", err);
     }
 
     #[test]

@@ -30,6 +30,11 @@ pub enum Expr {
         name: String,
         value: Box<Expr>,
     },
+    If {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
     Unary {
         op: TokenKind,
         expr: Box<Expr>,
