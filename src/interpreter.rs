@@ -108,7 +108,13 @@ enum Flow {
 
 pub struct Interpreter {
     globals: EnvRef,
+    call_depth: usize,
 }
+
+//: Giới hạn độ sâu gọi hàm tránh stack overflow của Rust. Mỗi lần gọi hàm
+//: trong Kinet tiêu tốn ~10-16KB stack Rust (debug build), nên giữ con số
+//: này an toàn ngay cả trên thread stack nhỏ (~2MB, như test harness).
+const MAX_CALL_DEPTH: usize = 128;
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -131,7 +137,10 @@ impl Interpreter {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
         }
-        Self { globals }
+        Self {
+            globals,
+            call_depth: 0,
+        }
     }
 
     pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
@@ -269,7 +278,10 @@ impl Interpreter {
                 let v = self.eval(expr, env)?;
                 match op {
                     TokenKind::Minus => match v {
-                        Value::Int(n) => Ok(Value::Int(-n)),
+                        Value::Int(n) => n
+                            .checked_neg()
+                            .map(Value::Int)
+                            .ok_or_else(|| "Tràn số khi lấy '-'".to_string()),
                         _ => Err("Toán tử '-' cần số".to_string()),
                     },
                     TokenKind::Not => Ok(Value::Bool(!self.truthy(&v))),
@@ -356,7 +368,10 @@ impl Interpreter {
 
         match op {
             TokenKind::Plus => match (&lv, &rv) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                (Value::Int(a), Value::Int(b)) => (*a)
+                    .checked_add(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| "Tràn số khi cộng".to_string()),
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
                 (Value::Str(a), Value::Int(b)) => Ok(Value::Str(format!("{}{}", a, b))),
                 (Value::Int(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
@@ -369,14 +384,18 @@ impl Interpreter {
                 if b == 0 {
                     return Err("Chia cho 0".to_string());
                 }
-                Ok(Value::Int(a / b))
+                a.checked_div(b)
+                    .map(Value::Int)
+                    .ok_or_else(|| "Tràn số khi chia".to_string())
             }
             TokenKind::Percent => {
                 let (a, b) = self.as_ints(&lv, &rv, op)?;
                 if b == 0 {
                     return Err("Chia lấy dư cho 0".to_string());
                 }
-                Ok(Value::Int(a % b))
+                a.checked_rem(b)
+                    .map(Value::Int)
+                    .ok_or_else(|| "Tràn số khi lấy dư".to_string())
             }
             TokenKind::Eq => Ok(Value::Bool(lv == rv)),
             TokenKind::NotEq => Ok(Value::Bool(lv != rv)),
@@ -391,10 +410,14 @@ impl Interpreter {
     fn int_arith(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
         let (a, b) = self.as_ints(l, r, op)?;
         let result = match op {
-            TokenKind::Minus => a - b,
-            TokenKind::Star => a * b,
+            TokenKind::Minus => a
+                .checked_sub(b)
+                .ok_or_else(|| "Tràn số khi trừ".to_string()),
+            TokenKind::Star => a
+                .checked_mul(b)
+                .ok_or_else(|| "Tràn số khi nhân".to_string()),
             _ => unreachable!(),
-        };
+        }?;
         Ok(Value::Int(result))
     }
 
@@ -438,6 +461,12 @@ impl Interpreter {
             Value::Func(def) => def,
             _ => return Err("Chỉ gọi được hàm, giá trị này không phải hàm".to_string()),
         };
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(format!(
+                "Độ sâu gọi hàm vượt giới hạn {} (có thể đệ quy vô hạn)",
+                MAX_CALL_DEPTH
+            ));
+        }
         if def.params.len() != args.len() {
             return Err(format!(
                 "Hàm '{}' cần {} đối số, nhận {}",
@@ -452,7 +481,11 @@ impl Interpreter {
         for (param, arg) in def.params.iter().zip(args) {
             env.borrow_mut().define(param, arg);
         }
-        match self.exec_block(&def.body, env)? {
+        self.call_depth += 1;
+        let result = self.exec_block(&def.body, env);
+        self.call_depth -= 1;
+        let flow = result?;
+        match flow {
             Flow::Return(v) => Ok(v),
             Flow::Break | Flow::Continue => Err(format!(
                 "'break'/'continue' không hợp lệ trong hàm '{}'",
@@ -462,10 +495,15 @@ impl Interpreter {
         }
     }
 
+    // Chuẩn Python: 0, chuỗi rỗng, list rỗng là falsy — quan trọng cho agent
+    // đọc exit code: `if exit_code` phải đúng nghĩa "code khác 0".
     fn truthy(&self, v: &Value) -> bool {
         match v {
             Value::Bool(b) => *b,
             Value::Nil => false,
+            Value::Int(n) => *n != 0,
+            Value::Str(s) => !s.is_empty(),
+            Value::List(items) => !items.is_empty(),
             _ => true,
         }
     }
@@ -811,6 +849,45 @@ mod tests {
     fn for_over_non_list_errors() {
         let err = run("for x in 5 { }").unwrap_err();
         assert!(err.contains("cần list"));
+    }
+
+    // ----- Regression: bug tìm được trong audit -----
+
+    #[test]
+    fn integer_overflow_is_error_not_panic() {
+        let err = run("let x = 9223372036854775807 + 1;").unwrap_err();
+        assert!(err.contains("Tràn số"));
+        let err = run("let x = 9223372036854775807 * 2;").unwrap_err();
+        assert!(err.contains("Tràn số khi nhân"));
+    }
+
+    #[test]
+    fn division_by_minus_one_overflow_is_error() {
+        // 0 - 9223372036854775808 không viết được literal vì số quá lớn,
+        // nhưng MIN đạt được qua phép tính: dùng checked ops, kết quả tràn.
+        let err = run("let x = -9223372036854775807 - 1; let y = x / 0;").unwrap_err();
+        assert!(err.contains("Chia cho 0"));
+    }
+
+    #[test]
+    fn deep_recursion_hits_limit_not_stack_overflow() {
+        let src = "func f(n) { return f(n + 1); } f(0);";
+        let err = run(src).unwrap_err();
+        assert!(err.contains("Độ sâu"));
+    }
+
+    #[test]
+    fn zero_empty_are_falsy() {
+        assert_eq!(run_and_get("let x = 0; let r = not x;", "r"), Value::Bool(true));
+        assert_eq!(
+            run_and_get(r#"let x = ""; let r = not x;"#, "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_and_get("let x = []; let r = not x;", "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(run_and_get("let x = 5; let r = not x;", "r"), Value::Bool(false));
     }
 }
 
