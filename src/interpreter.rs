@@ -102,6 +102,8 @@ impl Env {
 enum Flow {
     Normal,
     Return(Value),
+    Break,
+    Continue,
 }
 
 pub struct Interpreter {
@@ -119,6 +121,12 @@ impl Interpreter {
                 ("get", native_get as fn(&[Value]) -> Result<Value, String>),
                 ("contains", native_contains as fn(&[Value]) -> Result<Value, String>),
                 ("append", native_append as fn(&[Value]) -> Result<Value, String>),
+                ("range", native_range as fn(&[Value]) -> Result<Value, String>),
+                ("split", native_split as fn(&[Value]) -> Result<Value, String>),
+                ("starts_with", native_starts_with as fn(&[Value]) -> Result<Value, String>),
+                ("ends_with", native_ends_with as fn(&[Value]) -> Result<Value, String>),
+                ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
+                ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
             ] {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
@@ -136,9 +144,22 @@ impl Interpreter {
                         v
                     ))
                 }
+                Flow::Break => return Err("'break' ngoài vòng lặp".to_string()),
+                Flow::Continue => return Err("'continue' ngoài vòng lặp".to_string()),
             }
         }
         Ok(())
+    }
+
+    // Chạy một block, trả về flow khi gặp return/break/continue.
+    fn exec_block(&mut self, stmts: &[Stmt], env: EnvRef) -> Result<Flow, String> {
+        for s in stmts {
+            let flow = self.exec(s, env.clone())?;
+            if !matches!(flow, Flow::Normal) {
+                return Ok(flow);
+            }
+        }
+        Ok(Flow::Normal)
     }
 
     fn exec(&mut self, stmt: &Stmt, env: EnvRef) -> Result<Flow, String> {
@@ -173,26 +194,45 @@ impl Interpreter {
                 } else {
                     else_branch
                 };
-                for s in branch {
-                    if let flow @ Flow::Return(_) = self.exec(s, env.clone())? {
-                        return Ok(flow);
-                    }
-                }
-                Ok(Flow::Normal)
+                self.exec_block(branch, env)
             }
             Stmt::While { cond, body } => {
-                while {
+                loop {
                     let cond_value = self.eval(cond, env.clone())?;
-                    self.truthy(&cond_value)
-                } {
-                    for s in body {
-                        if let flow @ Flow::Return(_) = self.exec(s, env.clone())? {
-                            return Ok(flow);
-                        }
+                    if !self.truthy(&cond_value) {
+                        break;
+                    }
+                    match self.exec_block(body, env.clone())? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        Flow::Continue | Flow::Normal => {}
                     }
                 }
                 Ok(Flow::Normal)
             }
+            Stmt::For { var, iterable, body } => {
+                let iter_value = self.eval(iterable, env.clone())?;
+                let Value::List(items) = iter_value else {
+                    return Err(format!(
+                        "'for in' cần list (vd: range(0,5)), gặp {}",
+                        self.to_string(&iter_value)
+                    ));
+                };
+                for item in items {
+                    // Biến lặp chỉ tồn tại trong body.
+                    let scope =
+                        std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                    scope.borrow_mut().define(var, item);
+                    match self.exec_block(body, scope)? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        Flow::Continue | Flow::Normal => {}
+                    }
+                }
+                Ok(Flow::Normal)
+            }
+            Stmt::Break => Ok(Flow::Break),
+            Stmt::Continue => Ok(Flow::Continue),
             Stmt::Func {
                 name,
                 params,
@@ -412,12 +452,14 @@ impl Interpreter {
         for (param, arg) in def.params.iter().zip(args) {
             env.borrow_mut().define(param, arg);
         }
-        for stmt in &def.body {
-            if let Flow::Return(v) = self.exec(stmt, env.clone())? {
-                return Ok(v);
-            }
+        match self.exec_block(&def.body, env)? {
+            Flow::Return(v) => Ok(v),
+            Flow::Break | Flow::Continue => Err(format!(
+                "'break'/'continue' không hợp lệ trong hàm '{}'",
+                def.name
+            )),
+            Flow::Normal => Ok(Value::Nil),
         }
-        Ok(Value::Nil)
     }
 
     fn truthy(&self, v: &Value) -> bool {
@@ -492,12 +534,125 @@ fn native_get(args: &[Value]) -> Result<Value, String> {
 
 fn native_contains(args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
-        return Err("contains() cần 2 đối số (list, x)".to_string());
+        return Err("contains() cần 2 đối số (list/chuỗi, x)".to_string());
     }
-    let Value::List(items) = &args[0] else {
-        return Err("contains() cần list ở đối số đầu".to_string());
+    match &args[0] {
+        Value::List(items) => Ok(Value::Bool(items.contains(&args[1]))),
+        Value::Str(s) => {
+            let Value::Str(sub) = &args[1] else {
+                return Err("contains() trên chuỗi cần chuỗi con".to_string());
+            };
+            Ok(Value::Bool(s.contains(sub)))
+        }
+        _ => Err("contains() cần list hoặc chuỗi ở đối số đầu".to_string()),
+    }
+}
+
+fn native_range(args: &[Value]) -> Result<Value, String> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err("range() cần 2-3 đối số (start, end[, step])".to_string());
+    }
+    let start = expect_int(&args[0], "range")?;
+    let end = expect_int(&args[1], "range")?;
+    let step = if args.len() == 3 {
+        expect_int(&args[2], "range")?
+    } else {
+        1
     };
-    Ok(Value::Bool(items.contains(&args[1])))
+    if step == 0 {
+        return Err("range(): step không được bằng 0".to_string());
+    }
+    let mut out = Vec::new();
+    if step > 0 {
+        let mut i = start;
+        while i < end {
+            out.push(Value::Int(i));
+            i += step;
+        }
+    } else {
+        let mut i = start;
+        while i > end {
+            out.push(Value::Int(i));
+            i += step;
+        }
+    }
+    Ok(Value::List(out))
+}
+
+fn native_split(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("split() cần 2 đối số (chuỗi, dấu phân tách)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("split() cần chuỗi ở đối số đầu".to_string());
+    };
+    let Value::Str(sep) = &args[1] else {
+        return Err("split() cần chuỗi phân tách ở đối số thứ 2".to_string());
+    };
+    let parts: Vec<Value> = s
+        .split(sep)
+        .map(|p| Value::Str(p.to_string()))
+        .collect();
+    Ok(Value::List(parts))
+}
+
+fn native_starts_with(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("starts_with() cần 2 đối số (chuỗi, tiền tố)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("starts_with() cần chuỗi ở đối số đầu".to_string());
+    };
+    let Value::Str(prefix) = &args[1] else {
+        return Err("starts_with() cần tiền tố là chuỗi".to_string());
+    };
+    Ok(Value::Bool(s.starts_with(prefix)))
+}
+
+fn native_ends_with(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("ends_with() cần 2 đối số (chuỗi, hậu tố)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("ends_with() cần chuỗi ở đối số đầu".to_string());
+    };
+    let Value::Str(suffix) = &args[1] else {
+        return Err("ends_with() cần hậu tố là chuỗi".to_string());
+    };
+    Ok(Value::Bool(s.ends_with(suffix)))
+}
+
+fn native_trim(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("trim() cần 1 đối số".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("trim() cần chuỗi".to_string());
+    };
+    Ok(Value::Str(s.trim().to_string()))
+}
+
+fn native_replace(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 3 {
+        return Err("replace() cần 3 đối số (chuỗi, chuỗi cũ, chuỗi mới)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("replace() cần chuỗi ở đối số đầu".to_string());
+    };
+    let Value::Str(from) = &args[1] else {
+        return Err("replace() cần chuỗi cũ là chuỗi".to_string());
+    };
+    let Value::Str(to) = &args[2] else {
+        return Err("replace() cần chuỗi mới là chuỗi".to_string());
+    };
+    Ok(Value::Str(s.replace(from, to)))
+}
+
+fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        _ => Err(format!("{}() cần đối số là số nguyên", fname)),
+    }
 }
 
 fn native_append(args: &[Value]) -> Result<Value, String> {

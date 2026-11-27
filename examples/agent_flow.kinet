@@ -16,9 +16,8 @@ func agent_run(round) {
 // ----- Logic agent viết bằng Kinet -----
 func run_agent(goal) {
     let history = [];
-    let rounds = 0;
 
-    while rounds < 5 {
+    for rounds in range(0, 5) {
         let result = agent_run(rounds);
         history = append(history, result);
 
@@ -34,7 +33,6 @@ func run_agent(goal) {
             println("🎯 Hoàn thành: ", goal);
             return [rounds + 1, history];
         }
-        rounds = rounds + 1;
     }
 
     println("⚠️  Quá số vòng tối đa — báo cáo thất bại");

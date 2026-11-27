@@ -37,6 +37,12 @@ while i < 3 {                 // vòng lặp while
     i = i + 1;                // gán lại biến
 }
 
+for n in range(0, 5) {        // vòng lặp for — lặp qua list/range
+    if n == 3 { continue; }   // bỏ qua vòng này
+    if n == 4 { break; }      // thoát hẳn
+    println(n);
+}
+
 func add(a, b) {              // hàm + đệ quy
     return a + b;
 }
@@ -58,8 +64,13 @@ println(add(2, 5));
 |---|---|---|
 | `len(x)` | độ dài chuỗi hoặc list | `len("chao")` → `4` |
 | `get(list, i)` | lấy phần tử (0-based) | `get([10, 20], 1)` → `20` |
-| `contains(list, x)` | có chứa phần tử không | `contains([1, 2], 2)` → `true` |
+| `contains(list, x)` / `contains(s, sub)` | list/chuỗi có chứa? | `contains([1, 2], 2)` → `true` |
 | `append(list, x)` | list mới + thêm phần tử (thuần, không đổi gốc) | `append([1], 2)` → `[1, 2]` |
+| `range(start, end[, step])` | list số nguyên (không gồm end) | `range(0, 5)` → `[0,1,2,3,4]` |
+| `split(s, sep)` | tách chuỗi → list | `split("a,b", ",")` → `["a","b"]` |
+| `starts_with(s, p)` / `ends_with(s, p)` | kiểm tra tiền/hậu tố | `starts_with("run: x", "run:")` → `true` |
+| `trim(s)` | bỏ khoảng trắng 2 đầu | `trim("  hi  ")` → `"hi"` |
+| `replace(s, a, b)` | thay hết `a` bằng `b` | `replace("a-b", "-", "+")` → `"a+b"` |
 
 ### match — pattern dispatch (cho logic agent)
 ```c
@@ -92,9 +103,9 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 ## Ý tưởng phát triển tiếp
 - [x] `match` (pattern dispatch: literal / binding / wildcard)
 - [x] List + hàm dựng sẵn (`len`, `get`, `contains`, `append`)
+- [x] `for` loop + `break`/`continue`
+- [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
-- [ ] `for` loop, `break`/`continue`
-- [ ] Thêm hàm string (split, contains, starts_with...)
 - [ ] **Nối Kinetic SDK** qua PyO3 (như `_kinetic_rs`) — Kinet điều khiển agent thật
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

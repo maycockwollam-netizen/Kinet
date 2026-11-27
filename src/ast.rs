@@ -66,6 +66,13 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    For {
+        var: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+    },
+    Break,
+    Continue,
     Func {
         name: String,
         params: Vec<String>,

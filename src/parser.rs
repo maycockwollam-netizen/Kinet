@@ -40,7 +40,18 @@ impl Parser {
             TokenKind::Func => self.func_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
+            TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
+            TokenKind::Break => {
+                self.advance();
+                self.expect_semi("break")?;
+                Ok(Stmt::Break)
+            }
+            TokenKind::Continue => {
+                self.advance();
+                self.expect_semi("continue")?;
+                Ok(Stmt::Continue)
+            }
             TokenKind::Print => {
                 self.advance();
                 let exprs = self.print_args("print")?;
@@ -114,6 +125,15 @@ impl Parser {
         let cond = self.expression()?;
         let body = self.block()?;
         Ok(Stmt::While { cond, body })
+    }
+
+    fn for_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // for
+        let var = self.expect_ident("tên biến lặp")?;
+        self.consume(TokenKind::In, "mong đợi 'in' sau biến lặp")?;
+        let iterable = self.expression()?;
+        let body = self.block()?;
+        Ok(Stmt::For { var, iterable, body })
     }
 
     fn return_stmt(&mut self) -> Result<Stmt, String> {
