@@ -263,8 +263,14 @@ impl Interpreter {
                 ("map_remove", native_map_remove as fn(&[Value]) -> Result<Value, String>),
                 ("read_file", native_read_file as fn(&[Value]) -> Result<Value, String>),
                 ("write_file", native_write_file as fn(&[Value]) -> Result<Value, String>),
+                ("exists", native_exists as fn(&[Value]) -> Result<Value, String>),
+                ("append_file", native_append_file as fn(&[Value]) -> Result<Value, String>),
+                ("list_dir", native_list_dir as fn(&[Value]) -> Result<Value, String>),
+                ("read_lines", native_read_lines as fn(&[Value]) -> Result<Value, String>),
                 ("chars", native_chars as fn(&[Value]) -> Result<Value, String>),
                 ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
+                ("to_float", native_to_float as fn(&[Value]) -> Result<Value, String>),
+                ("str", native_str as fn(&[Value]) -> Result<Value, String>),
                 ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
                 ("substring", native_substring as fn(&[Value]) -> Result<Value, String>),
                 ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
@@ -1002,12 +1008,43 @@ fn native_to_int(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
         return Err("to_int() cần 1 đối số".to_string());
     }
-    let Value::Str(s) = &args[0] else {
-        return Err("to_int() cần chuỗi".to_string());
-    };
-    s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-        format!("to_int(): '{}' không phải số nguyên", s)
-    })
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Float(f) => {
+            if f.is_finite() {
+                Ok(Value::Int(*f as i64))
+            } else {
+                Err("to_int(): số không hữu hạn".to_string())
+            }
+        }
+        Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+            format!("to_int(): '{}' không phải số nguyên", s)
+        }),
+        _ => Err("to_int() cần chuỗi, số nguyên hoặc số thập phân".to_string()),
+    }
+}
+
+fn native_to_float(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("to_float() cần 1 đối số".to_string());
+    }
+    match &args[0] {
+        Value::Float(f) => Ok(Value::Float(*f)),
+        Value::Int(n) => Ok(Value::Float(*n as f64)),
+        Value::Str(s) => s
+            .trim()
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| format!("to_float(): '{}' không phải số thập phân", s)),
+        _ => Err("to_float() cần chuỗi, số nguyên hoặc số thập phân".to_string()),
+    }
+}
+
+fn native_str(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("str() cần 1 đối số".to_string());
+    }
+    Ok(Value::Str(stringify_value(&args[0])))
 }
 
 fn native_substring(args: &[Value]) -> Result<Value, String> {
@@ -1128,6 +1165,74 @@ fn native_write_file(args: &[Value]) -> Result<Value, String> {
     std::fs::write(&resolved, content)
         .map_err(|e| format!("write_file('{}') thất bại: {}", path, e))?;
     Ok(Value::Bool(true))
+}
+
+fn native_exists(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("exists() cần 1 đối số (đường dẫn)".to_string());
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err("exists() cần chuỗi đường dẫn".to_string());
+    };
+    let resolved = resolve_sandbox(path)?;
+    Ok(Value::Bool(resolved.exists()))
+}
+
+fn native_append_file(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err("append_file() cần 2 đối số (đường dẫn, nội dung)".to_string());
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err("append_file() cần chuỗi đường dẫn".to_string());
+    };
+    let Value::Str(content) = &args[1] else {
+        return Err("append_file() cần nội dung là chuỗi".to_string());
+    };
+    check_len("append_file() nội dung", content.chars().count(), MAX_STR_CHARS)?;
+    let resolved = resolve_sandbox(path)?;
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&resolved)
+        .map_err(|e| format!("append_file('{}') thất bại: {}", path, e))?;
+    f.write_all(content.as_bytes())
+        .map_err(|e| format!("append_file('{}') thất bại: {}", path, e))?;
+    Ok(Value::Bool(true))
+}
+
+fn native_list_dir(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("list_dir() cần 1 đối số (thư mục)".to_string());
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err("list_dir() cần chuỗi đường dẫn".to_string());
+    };
+    let resolved = resolve_sandbox(path)?;
+    let mut names: Vec<String> = std::fs::read_dir(&resolved)
+        .map_err(|e| format!("list_dir('{}') thất bại: {}", path, e))?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .and_then(|e| e.file_name().into_string().ok())
+        })
+        .collect();
+    names.sort(); // in thứ tự ổn định
+    Ok(Value::List(
+        names.into_iter().map(Value::Str).collect(),
+    ))
+}
+
+fn native_read_lines(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("read_lines() cần 1 đối số (chuỗi)".to_string());
+    }
+    let Value::Str(s) = &args[0] else {
+        return Err("read_lines() cần chuỗi".to_string());
+    };
+    let lines: Vec<Value> = s.lines().map(|l| Value::Str(l.to_string())).collect();
+    check_len("read_lines() kết quả", lines.len(), MAX_LIST_LEN)?;
+    Ok(Value::List(lines))
 }
 
 fn native_range(args: &[Value]) -> Result<Value, String> {
@@ -2099,6 +2204,54 @@ mod tests {
     #[test]
     fn float_zero_is_falsy() {
         assert_eq!(run_and_get("let x = 0.0; let r = not x;", "r"), Value::Bool(true));
+    }
+
+    // ----- Đồ nghề hằng ngày: chuyển đổi kiểu + file I/O mở rộng -----
+
+    #[test]
+    fn type_conversions() {
+        assert_eq!(run_and_get(r#"let x = to_float("3.14");"#, "x"), Value::Float(3.14));
+        assert_eq!(run_and_get("let x = to_float(2);", "x"), Value::Float(2.0));
+        assert_eq!(run_and_get("let x = to_int(3.9);", "x"), Value::Int(3));
+        assert_eq!(run_and_get(r#"let x = str(42);"#, "x"), Value::Str("42".into()));
+        assert_eq!(run_and_get(r#"let x = str(2.5);"#, "x"), Value::Str("2.5".into()));
+        assert_eq!(
+            run_and_get(r#"let x = str({ "a": 1 });"#, "x"),
+            Value::Str("{a: 1}".into())
+        );
+    }
+
+    #[test]
+    fn exists_and_append_file_and_read_lines() {
+        let path = sandbox_tmp("kinet_extra_io.txt");
+        let rel = "target/test_tmp/kinet_extra_io.txt";
+        // exists trước khi tạo
+        assert_eq!(run_and_get(&format!("let e = exists(\"{}\");", rel), "e"), Value::Bool(false));
+        run(&format!("write_file(\"{}\", \"dong 1\n\");", rel)).unwrap();
+        run(&format!("append_file(\"{}\", \"dong 2\n\");", rel)).unwrap();
+        assert_eq!(run_and_get(&format!("let e = exists(\"{}\");", rel), "e"), Value::Bool(true));
+        let content = run_and_get(&format!("let s = read_file(\"{}\");", rel), "s");
+        assert_eq!(content, Value::Str("dong 1\ndong 2\n".into()));
+        let lines = run_and_get(&format!("let l = read_lines(read_file(\"{}\"));", rel), "l");
+        assert_eq!(
+            lines,
+            Value::List(vec![Value::Str("dong 1".into()), Value::Str("dong 2".into())])
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_dir_returns_sorted_names() {
+        let dir = sandbox_tmp("kinet_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.txt"), "1").unwrap();
+        std::fs::write(dir.join("a.txt"), "2").unwrap();
+        let got = run_and_get(r#"let d = list_dir("target/test_tmp/kinet_dir");"#, "d");
+        assert_eq!(
+            got,
+            Value::List(vec![Value::Str("a.txt".into()), Value::Str("b.txt".into())])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

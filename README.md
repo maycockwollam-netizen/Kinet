@@ -94,7 +94,13 @@ try {                          // bắt lỗi runtime
 | `write_file(p, s)` | ghi nội dung file | `write_file("a.txt", "hi")` |
 | `chars(s)` | list các ký tự (chuỗi 1 chữ) | `chars("ab")` → `["a","b"]` |
 | `ord(c)` | mã Unicode của ký tự đầu | `ord("0")` → `48` |
-| `to_int(s)` | chuỗi → số nguyên | `to_int("42")` → `42` |
+| `to_int(x)` | số/chuỗi → số nguyên | `to_int("42")` → `42`, `to_int(3.9)` → `3` |
+| `to_float(x)` | số/chuỗi → số thập phân | `to_float("3.14")` → `3.14` |
+| `str(x)` | mọi giá trị → chuỗi | `str({ "a": 1 })` → `"{a: 1}"` |
+| `exists(p)` | đường dẫn có tồn tại? | `exists("a.txt")` → `true` |
+| `append_file(p, s)` | ghi THÊM vào file | `append_file("log.txt", "x")` |
+| `list_dir(p)` | liệt kê tên file (sắp xếp) | `list_dir(".")` |
+| `read_lines(s)` | chuỗi → list dòng | `read_lines("a\nb")` → `["a","b"]` |
 | `substring(s, start, len)` | cắt chuỗi | `substring("hello", 1, 3)` → `"ell"` |
 | `to_upper(s)` / `to_lower(s)` | viết hoa / thường | `to_upper("ab")` → `"AB"` |
 | `list_join(list, sep)` | nối list thành chuỗi | `list_join(["a","b"], "-")` → `"a-b"` |
