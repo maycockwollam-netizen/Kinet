@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use ast::{Expr, Pattern, Stmt};
+use ast::{CompClause, Expr, Pattern, Stmt};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     // Chạy mọi thứ trên thread stack lớn (64MB) để đệ quy sâu trong Kinet
     // không tràn stack trước khi chạm MAX_CALL_DEPTH.
     let spawned = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
+        .stack_size(128 * 1024 * 1024)
         .spawn(run_all);
     match spawned {
         Ok(handle) => match handle.join() {
@@ -398,6 +398,64 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             p_indent(out, indent);
             out.push('}');
         }
+        Expr::Slice {
+            target,
+            start,
+            end,
+            step,
+        } => {
+            p_expr(target, indent, out);
+            out.push('[');
+            if let Some(s) = start {
+                p_expr(s, indent + 1, out);
+            }
+            out.push(':');
+            if let Some(e) = end {
+                p_expr(e, indent + 1, out);
+            }
+            if let Some(st) = step {
+                out.push(':');
+                p_expr(st, indent + 1, out);
+            }
+            out.push(']');
+        }
+        Expr::Comp { element, clauses } => {
+            out.push('[');
+            p_expr(element, indent + 1, out);
+            for clause in clauses {
+                p_comp_clause(clause, indent + 1, out);
+            }
+            out.push(']');
+        }
+        Expr::DictComp {
+            key,
+            value,
+            clauses,
+        } => {
+            out.push('{');
+            p_expr(key, indent + 1, out);
+            out.push_str(": ");
+            p_expr(value, indent + 1, out);
+            for clause in clauses {
+                p_comp_clause(clause, indent + 1, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn p_comp_clause(clause: &CompClause, indent: usize, out: &mut String) {
+    match clause {
+        CompClause::For { var, iterable } => {
+            out.push_str(" for ");
+            out.push_str(var);
+            out.push_str(" in ");
+            p_expr(iterable, indent + 1, out);
+        }
+        CompClause::If(cond) => {
+            out.push_str(" if ");
+            p_expr(cond, indent + 1, out);
+        }
     }
 }
 
@@ -422,6 +480,7 @@ fn op_symbol(op: &TokenKind) -> &'static str {
         TokenKind::Gt => ">",
         TokenKind::Le => "<=",
         TokenKind::Ge => ">=",
+        TokenKind::In => "in",
         TokenKind::Shl => "<<",
         TokenKind::Shr => ">>",
         TokenKind::Band => "&",

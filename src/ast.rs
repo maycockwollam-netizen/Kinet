@@ -18,6 +18,16 @@ pub struct MatchArm {
     pub body: Expr,
 }
 
+/// Một mệnh đề trong comprehension: `for x in iter` hoặc bộ lọc `if cond`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompClause {
+    For {
+        var: String,
+        iterable: Expr,
+    },
+    If(Expr),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(i64),
@@ -69,6 +79,24 @@ pub enum Expr {
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    // Cắt mục: `a[1:4]`, `a[:4]`, `a[::2]`, `a[::-1]` (start/end/step tùy chọn).
+    Slice {
+        target: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
+    // List comprehension: `[expr for x in iter if cond] ...`
+    Comp {
+        element: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
+    // Dict comprehension: `{ key: value for x in iter if cond }`
+    DictComp {
+        key: Box<Expr>,
+        value: Box<Expr>,
+        clauses: Vec<CompClause>,
     },
 }
 

@@ -4,13 +4,13 @@
 //!   or
 //!   and
 //!   == !=
-//!   < > <= >=
+//!   < > <= >=  (cùng bậc: in / not in)
 //!   + -
 //!   * / %
 //!   unary (- not)
 //!   primary / call
 
-use crate::ast::{Expr, MatchArm, Pattern, Stmt};
+use crate::ast::{CompClause, Expr, MatchArm, Pattern, Stmt};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
 
@@ -278,10 +278,49 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> Result<Expr, String> {
-        self.left_assoc_binary(
-            &[TokenKind::Lt, TokenKind::Gt, TokenKind::Le, TokenKind::Ge],
-            Self::bitwise,
-        )
+        let mut left = self.bitwise()?;
+        loop {
+            // Quy tắc chung: < > <= >= in, và "not in" (được desugar thành
+            // Unary(Not, Binary(In))). Cùng bậc, kết hợp trái như Python.
+            let op = if self.check(&TokenKind::Lt) {
+                Some(TokenKind::Lt)
+            } else if self.check(&TokenKind::Gt) {
+                Some(TokenKind::Gt)
+            } else if self.check(&TokenKind::Le) {
+                Some(TokenKind::Le)
+            } else if self.check(&TokenKind::Ge) {
+                Some(TokenKind::Ge)
+            } else if self.check(&TokenKind::In) {
+                Some(TokenKind::In)
+            } else if self.check(&TokenKind::Not) && self.peek_kind_at(1) == Some(TokenKind::In) {
+                Some(TokenKind::NotIn)
+            } else {
+                None
+            };
+            let Some(op) = op else { break };
+            self.advance(); // toán tử — riêng NotIn ăn thêm 'in'
+            if op == TokenKind::NotIn {
+                self.advance();
+            }
+            let right = self.bitwise()?;
+            left = if op == TokenKind::NotIn {
+                Expr::Unary {
+                    op: TokenKind::Not,
+                    expr: Box::new(Expr::Binary {
+                        left: Box::new(left),
+                        op: TokenKind::In,
+                        right: Box::new(right),
+                    }),
+                }
+            } else {
+                Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }
+            };
+        }
+        Ok(left)
     }
 
     // << >> & | (cùng bậc, kết hợp trái).
@@ -332,18 +371,62 @@ impl Parser {
                     args,
                 };
             } else if self.match_or(TokenKind::LBracket) {
-                // arr[i] / m["k"] / grid[r][c] — chỉ số có thể là biểu thức bất kỳ.
-                let index = self.expression()?;
-                self.consume(TokenKind::RBracket, "mong đợi ']' sau chỉ số")?;
-                callee = Expr::Index {
-                    target: Box::new(callee),
-                    index: Box::new(index),
-                };
+                // arr[i] / m["k"] / grid[r][c] — hoặc slice arr[i:j] / arr[:j] / arr[::k].
+                if self.check(&TokenKind::Colon) {
+                    // Bắt đầu bằng ':' → thiếu start: a[:end] / a[::step]
+                    self.advance(); // ':'
+                    let (end, step) = self.slice_end_step()?;
+                    callee = Expr::Slice {
+                        target: Box::new(callee),
+                        start: None,
+                        end,
+                        step,
+                    };
+                } else {
+                    let first = self.expression()?;
+                    if self.match_or(TokenKind::Colon) {
+                        let (end, step) = self.slice_end_step()?;
+                        callee = Expr::Slice {
+                            target: Box::new(callee),
+                            start: Some(Box::new(first)),
+                            end,
+                            step,
+                        };
+                    } else {
+                        self.consume(TokenKind::RBracket, "mong đợi ']' sau chỉ số")?;
+                        callee = Expr::Index {
+                            target: Box::new(callee),
+                            index: Box::new(first),
+                        };
+                    }
+                }
             } else {
                 break;
             }
         }
         Ok(callee)
+    }
+
+    // Sau dấu ':' đầu tiên của slice: đọc `end` và `step` (cả hai tùy chọn),
+    // rồi nuốt luôn ']'. Hỗ trợ a[1:end] / a[1:end:step] / a[1::step] / a[:] / a[::].
+    fn slice_end_step(&mut self) -> Result<(Option<Box<Expr>>, Option<Box<Expr>>), String> {
+        let mut end = None;
+        let mut step = None;
+        if self.match_or(TokenKind::Colon) {
+            // '::' — không có end, chỉ có step (tùy chọn)
+            if !self.check(&TokenKind::RBracket) {
+                step = Some(Box::new(self.expression()?));
+            }
+        } else if !self.check(&TokenKind::RBracket) {
+            end = Some(Box::new(self.expression()?));
+            if self.match_or(TokenKind::Colon) {
+                if !self.check(&TokenKind::RBracket) {
+                    step = Some(Box::new(self.expression()?));
+                }
+            }
+        }
+        self.consume(TokenKind::RBracket, "mong đợi ']' sau slice")?;
+        Ok((end, step))
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
@@ -376,20 +459,36 @@ impl Parser {
             }
             TokenKind::Match => self.match_expr(),
             TokenKind::LBracket => {
-                let mut items = Vec::new();
-                if !self.match_or(TokenKind::RBracket) {
-                    loop {
-                        items.push(self.expression()?);
-                        if !self.match_or(TokenKind::Comma) {
-                            break;
+                if self.match_or(TokenKind::RBracket) {
+                    Ok(Expr::List(Vec::new())) // []
+                } else {
+                    let first = self.expression()?;
+                    if self.match_or(TokenKind::For) {
+                        // List comprehension: [expr for x in iter if cond ...]
+                        let clauses = self.comp_clauses()?;
+                        self.consume(
+                            TokenKind::RBracket,
+                            "mong đợi ']' sau comprehension",
+                        )?;
+                        Ok(Expr::Comp {
+                            element: Box::new(first),
+                            clauses,
+                        })
+                    } else {
+                        let mut items = vec![first];
+                        while self.match_or(TokenKind::Comma) {
+                            if self.check(&TokenKind::RBracket) {
+                                break; // dấu phẩy cuối — cho phép
+                            }
+                            items.push(self.expression()?);
                         }
-                        if self.check(&TokenKind::RBracket) {
-                            break; // dấu phẩy cuối — cho phép
-                        }
+                        self.consume(
+                            TokenKind::RBracket,
+                            "mong đợi ']' sau danh sách",
+                        )?;
+                        Ok(Expr::List(items))
                     }
-                    self.consume(TokenKind::RBracket, "mong đợi ']' sau danh sách")?;
                 }
-                Ok(Expr::List(items))
             }
             TokenKind::LBrace => {
                 // Trong ngữ cảnh biểu thức, '{' luôn là dict literal (block
@@ -402,24 +501,58 @@ impl Parser {
 
     fn dict_literal(&mut self) -> Result<Expr, String> {
         // primary() đã ăn '{' trước khi gọi hàm này.
-        let mut entries: Vec<(Expr, Expr)> = Vec::new();
         if self.match_or(TokenKind::RBrace) {
-            return Ok(Expr::Dict(entries)); // {}
+            return Ok(Expr::Dict(Vec::new())); // {}
         }
+        let key = self.expression()?;
+        self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
+        let value = self.expression()?;
+        if self.match_or(TokenKind::For) {
+            // Dict comprehension: { key: value for x in iter ... }
+            let clauses = self.comp_clauses()?;
+            self.consume(TokenKind::RBrace, "mong đợi '}' sau dict comprehension")?;
+            return Ok(Expr::DictComp {
+                key: Box::new(key),
+                value: Box::new(value),
+                clauses,
+            });
+        }
+        let mut entries = vec![(key, value)];
         loop {
-            let key = self.expression()?;
-            self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
-            let value = self.expression()?;
-            entries.push((key, value));
             if !self.match_or(TokenKind::Comma) {
                 break;
             }
             if self.check(&TokenKind::RBrace) {
                 break; // dấu phẩy cuối — cho phép
             }
+            let k = self.expression()?;
+            self.consume(TokenKind::Colon, "mong đợi ':' giữa khóa và giá trị trong dict")?;
+            let v = self.expression()?;
+            entries.push((k, v));
         }
         self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
         Ok(Expr::Dict(entries))
+    }
+
+    // Parse các mệnh đề comprehension sau keyword `for` (đã ăn).
+    // Ví dụ: `for x in a if cond for y in b` → [For(x,a), If(cond), For(y,b)].
+    // Vế biểu thức của iterable/cond tự dừng trước `for`/`if`/`]`.
+    fn comp_clauses(&mut self) -> Result<Vec<CompClause>, String> {
+        let mut clauses = Vec::new();
+        loop {
+            let var = self.expect_ident("tên biến trong comprehension")?;
+            self.consume(TokenKind::In, "mong đợi 'in' trong comprehension")?;
+            let iterable = self.expression()?;
+            clauses.push(CompClause::For { var, iterable });
+            while self.match_or(TokenKind::If) {
+                let cond = self.expression()?;
+                clauses.push(CompClause::If(cond));
+            }
+            if !self.match_or(TokenKind::For) {
+                break;
+            }
+        }
+        Ok(clauses)
     }
 
     fn if_expr_after_if(&mut self) -> Result<Expr, String> {
@@ -587,6 +720,12 @@ impl Parser {
 
     fn check(&self, kind: &TokenKind) -> bool {
         &self.peek().kind == kind
+    }
+
+    // Loại token cách vị trí hiện tại `offset` bước (0 = peek, 1 = kế tiếp).
+    fn peek_kind_at(&self, offset: usize) -> Option<TokenKind> {
+        let i = (self.pos + offset).min(self.tokens.len().saturating_sub(1));
+        self.tokens.get(i).map(|t| t.kind.clone())
     }
 
     fn consume(&mut self, kind: TokenKind, msg: &str) -> Result<bool, String> {

@@ -136,10 +136,31 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 ### Toán tử
 - Số học: `+ - * / %` (có `+` cho chuỗi — nối kiểu; `*` lặp chuỗi: `"ab" * 3` → `"ababab"`)
 - So sánh: `== != < > <= >=`
+- **`in`**: kiểm tra chứa (cùng bậc so sánh) — `3 in [1, 2, 3]`, `"bc" in "abcd"`, `"k" in map`; có `x not in y` (desugar thành `not (x in y)`)
 - Bit: `& | << >>` (chỉ số nguyên)
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)
-- Phép gán: `=` `a[i] = v` `m["k"] = v`
+- Phép gán: `=` `a[i] = v` `m["k"] = v` (chỉ số âm được phép: `a[-1] = 9`)
 - **`if` là biểu thức**: `let x = if ok { 1 } else { 2 };` (hỗ trợ `else if` lồng)
+
+### Slice và comprehension (giống Python)
+```c
+let a = [0, 1, 2, 3, 4, 5];
+a[1:4];        // → [1, 2, 3]        (từ 1 tới 3)
+a[:3];         // → [0, 1, 2]        (thiếu start = từ đầu)
+a[2:];         // → [2, 3, 4, 5]     (thiếu end = tới hết)
+a[::2];        // → [0, 2, 4]        (bước nhảy 2)
+a[::-1];       // → [5, 4, 3, 2, 1, 0] (đảo ngược)
+a[-1];         // → 5                (chỉ số âm, đếm từ cuối)
+"xin chào"[1:3]; // → "in"           (cắt chuỗi theo ký tự Unicode)
+
+// List comprehension: [expr for x in list if điều_kiện]
+[x * x for x in range(0, 6)];                    // → [0, 1, 4, 9, 16, 25]
+[x for x in range(0, 10) if x % 2 == 0];         // → [0, 2, 4, 6, 8]
+[x + y for x in [1, 2] for y in [10, 20]];       // nhiều vòng lặp
+
+// Dict comprehension: { key: value for ... }
+{ i: i * i for i in range(1, 4) };               // → {1: 1, 2: 4, 3: 9}
+```
 
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 

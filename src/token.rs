@@ -52,6 +52,7 @@ pub enum TokenKind {
     Gt,     // >
     Le,     // <=
     Ge,     // >=
+    NotIn,  // not in — chỉ dùng trong parser, desugar thành not (x in y)
     Shl,    // <<
     Shr,    // >>
     Band,   // &

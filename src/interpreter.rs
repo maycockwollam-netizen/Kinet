@@ -661,10 +661,159 @@ impl Interpreter {
                 Ok(Value::Map(out))
             }
             Expr::Match { value, arms } => self.eval_match(value, arms, env),
+            Expr::Slice {
+                target,
+                start,
+                end,
+                step,
+            } => self.eval_slice(target, start, end, step, env),
+            Expr::Comp { element, clauses } => {
+                self.eval_list_comp(element, clauses, env)
+            }
+            Expr::DictComp {
+                key,
+                value,
+                clauses,
+            } => self.eval_dict_comp(key, value, clauses, env),
         }
     }
 
-    fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRef) -> Result<Value, String> {
+fn eval_slice(
+        &mut self,
+        target: &Expr,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        step: &Option<Box<Expr>>,
+        env: EnvRef,
+    ) -> Result<Value, String> {
+        let container = self.eval(target, env.clone())?;
+        let s = match start {
+            Some(e) => Some(expect_index(&self.eval(e, env.clone())?)?),
+            None => None,
+        };
+        let en = match end {
+            Some(e) => Some(expect_index(&self.eval(e, env.clone())?)?),
+            None => None,
+        };
+        let st = match step {
+            Some(e) => expect_index(&self.eval(e, env.clone())?)?,
+            None => 1,
+        };
+        self.slice_value(&container, s, en, st)
+    }
+
+    fn eval_list_comp(
+        &mut self,
+        element: &Expr,
+        clauses: &[crate::ast::CompClause],
+        env: EnvRef,
+    ) -> Result<Value, String> {
+        let mut out: Vec<Value> = Vec::new();
+        let mut leaf = |this: &mut Self, leaf_env: EnvRef| -> Result<(), String> {
+            let v = this.eval(element, leaf_env)?;
+            check_len("comprehension", out.len() + 1, MAX_LIST_LEN)?;
+            out.push(v);
+            Ok(())
+        };
+        self.comp_clause_walk(clauses, 0, env, &mut leaf)?;
+        Ok(Value::List(out))
+    }
+
+    fn eval_dict_comp(
+        &mut self,
+        key: &Expr,
+        value: &Expr,
+        clauses: &[crate::ast::CompClause],
+        env: EnvRef,
+    ) -> Result<Value, String> {
+        let mut out: IndexMap<Value, Value> = IndexMap::new();
+        let mut leaf = |this: &mut Self, leaf_env: EnvRef| -> Result<(), String> {
+            let k = this.eval(key, leaf_env.clone())?;
+            let v = this.eval(value, leaf_env)?;
+            check_len("dict comprehension", out.len() + 1, MAX_LIST_LEN)?;
+            out.insert(k, v);
+            Ok(())
+        };
+        self.comp_clause_walk(clauses, 0, env, &mut leaf)?;
+        Ok(Value::Map(out))
+    }
+
+    // Đi qua chuỗi mệnh đề comprehension (for/if) và gọi `leaf` ở mỗi tổ hợp
+    // biến khớp. `for` tạo scope riêng mỗi lần lặp (giống vòng for thường).
+    fn comp_clause_walk(
+        &mut self,
+        clauses: &[crate::ast::CompClause],
+        i: usize,
+        env: EnvRef,
+        leaf: &mut dyn FnMut(&mut Self, EnvRef) -> Result<(), String>,
+    ) -> Result<(), String> {
+        use crate::ast::CompClause;
+        if i == clauses.len() {
+            return leaf(self, env);
+        }
+        match &clauses[i] {
+            CompClause::For { var, iterable } => {
+                let iter = self.eval(iterable, env.clone())?;
+                let Value::List(items) = iter else {
+                    return Err(format!(
+                        "comprehension 'for' cần list (vd: range(0,5)), gặp {}",
+                        self.to_string(&iter)
+                    ));
+                };
+                for item in items {
+                    let scope =
+                        std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                    scope.borrow_mut().define(var, item);
+                    self.comp_clause_walk(clauses, i + 1, scope, leaf)?;
+                }
+            }
+            CompClause::If(cond) => {
+                let c = self.eval(cond, env.clone())?;
+                if self.truthy(&c) {
+                    self.comp_clause_walk(clauses, i + 1, env, leaf)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Lấy lát cắt theo quy tắc Python: a[start:end:step]; start/end/step None = mặc định.
+    fn slice_value(
+        &self,
+        container: &Value,
+        start: Option<i64>,
+        end: Option<i64>,
+        step: i64,
+    ) -> Result<Value, String> {
+        match container {
+            Value::List(items) => {
+                let (lo, hi) = adjust_slice(items.len(), start, end, step)?;
+                let mut out = Vec::new();
+                let mut i = lo;
+                while (step > 0 && i < hi) || (step < 0 && i > hi) {
+                    out.push(items[i as usize].clone());
+                    check_len("slice list", out.len(), MAX_LIST_LEN)?;
+                    i += step;
+                }
+                Ok(Value::List(out))
+            }
+            Value::Str(s) => {
+                let chars: Vec<char> = s.chars().collect();
+                let (lo, hi) = adjust_slice(chars.len(), start, end, step)?;
+                let mut out = String::new();
+                let mut i = lo;
+                while (step > 0 && i < hi) || (step < 0 && i > hi) {
+                    out.push(chars[i as usize]);
+                    check_len("slice chuỗi", out.chars().count(), MAX_STR_CHARS)?;
+                    i += step;
+                }
+                Ok(Value::Str(out))
+            }
+            _ => Err("slice `[a:b]` chỉ áp dụng cho list hoặc chuỗi".to_string()),
+        }
+    }
+
+fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRef) -> Result<Value, String> {
         let matched = self.eval(value, env.clone())?;
         for arm in arms {
             let pattern_matches = match &arm.pattern {
@@ -689,6 +838,28 @@ impl Interpreter {
             }
         }
         Err("Không có nhánh nào của match khớp (thiếu default?)".to_string())
+    }
+
+    // `x in y`: list chứa phần tử, chuỗi chứa chuỗi con, map chứa khóa.
+    // Để ngoài eval_binary cho frame gọn (path nóng của đệ quy).
+    fn eval_in(&self, lv: &Value, rv: &Value) -> Result<Value, String> {
+        if let Value::Str(s) = rv {
+            let Value::Str(needle) = lv else {
+                return Err("vế trái của 'in' phải là chuỗi khi vế phải là chuỗi".to_string());
+            };
+            return Ok(Value::Bool(s.contains(needle)));
+        }
+        let found = match rv {
+            Value::List(items) => items.contains(lv),
+            Value::Map(entries) => entries.contains_key(lv),
+            _ => {
+                return Err(format!(
+                    "toán tử 'in' cần list, chuỗi hoặc map ở vế phải, gặp {}",
+                    self.to_string(rv)
+                ));
+            }
+        };
+        Ok(Value::Bool(found))
     }
 
     fn eval_binary(
@@ -754,6 +925,7 @@ impl Interpreter {
             TokenKind::Gt => self.cmp_values(&lv, &rv, op),
             TokenKind::Le => self.cmp_values(&lv, &rv, op),
             TokenKind::Ge => self.cmp_values(&lv, &rv, op),
+            TokenKind::In => self.eval_in(&lv, &rv),
             TokenKind::Band => self.bitop(&lv, &rv, op),
             TokenKind::Bor => self.bitop(&lv, &rv, op),
             TokenKind::Shl => self.bitop(&lv, &rv, op),
@@ -867,41 +1039,32 @@ impl Interpreter {
         }
     }
 
-    // Đọc phần tử: list theo chỉ số int, map theo khóa.
+    // Đọc phần tử: list/chuỗi theo chỉ số int (âm = đếm từ cuối), map theo khóa.
     fn index_get(&self, container: &Value, idx: &Value) -> Result<Value, String> {
         match container {
             Value::List(items) => {
-                let i = expect_index(idx)?;
-                if i < 0 || i as usize >= items.len() {
-                    return Err(format!(
-                        "chỉ số {} ngoài phạm vi list (len={})",
-                        i,
-                        items.len()
-                    ));
-                }
-                Ok(items[i as usize].clone())
+                let i = expect_and_normalize_index(idx, items.len())?;
+                Ok(items[i].clone())
+            }
+            Value::Str(s) => {
+                let chars: Vec<char> = s.chars().collect();
+                let i = expect_and_normalize_index(idx, chars.len())?;
+                Ok(Value::Str(chars[i].to_string()))
             }
             Value::Map(entries) => entries.get(idx).cloned().ok_or_else(|| {
                 "map không có khóa này".to_string()
             }),
-            _ => Err("chỉ số `[]` chỉ áp dụng cho list hoặc map".to_string()),
+            _ => Err("chỉ số `[]` chỉ áp dụng cho list, chuỗi hoặc map".to_string()),
         }
     }
 
-    // Ghi phần tử (bản sao cập nhật); dùng cho `arr[i] = v`.
+    // Ghi phần tử (bản sao cập nhật); dùng cho `arr[i] = v`. Chỉ số âm được phép.
     fn index_set(&self, container: &Value, idx: &Value, val: Value) -> Result<Value, String> {
         match container {
             Value::List(items) => {
-                let i = expect_index(idx)?;
-                if i < 0 || i as usize >= items.len() {
-                    return Err(format!(
-                        "chỉ số {} ngoài phạm vi list (len={})",
-                        i,
-                        items.len()
-                    ));
-                }
+                let i = expect_and_normalize_index(idx, items.len())?;
                 let mut out = items.clone();
-                out[i as usize] = val;
+                out[i] = val;
                 Ok(Value::List(out))
             }
             Value::Map(entries) => {
@@ -949,6 +1112,7 @@ impl Interpreter {
             TokenKind::Gt => ">",
             TokenKind::Le => "<=",
             TokenKind::Ge => ">=",
+            TokenKind::In => "in",
             TokenKind::Shl => "<<",
             TokenKind::Shr => ">>",
             TokenKind::Band => "&",
@@ -1114,18 +1278,10 @@ fn native_get(args: &[Value]) -> Result<Value, String> {
         return Err("get() cần 2 đối số (list/map, chỉ số/khóa)".to_string());
     }
     match &args[0] {
+        // Chỉ số âm đếm từ cuối (như `a[-1]`) — nhất quán với toán tử `[]`.
         Value::List(items) => {
-            let Value::Int(i) = args[1] else {
-                return Err("get(list, i) cần số nguyên ở đối số thứ 2".to_string());
-            };
-            if i < 0 || i as usize >= items.len() {
-                return Err(format!(
-                    "get(): chỉ số {} ngoài phạm vi (len={})",
-                    i,
-                    items.len()
-                ));
-            }
-            Ok(items[i as usize].clone())
+            let i = expect_and_normalize_index(&args[1], items.len())?;
+            Ok(items[i].clone())
         }
         Value::Map(entries) => entries.get(&args[1]).cloned().ok_or_else(|| {
             "get(map, khóa) — không có khóa này trong map".to_string()
@@ -1676,6 +1832,92 @@ fn expect_index(v: &Value) -> Result<i64, String> {
     }
 }
 
+/// Chuyển chỉ số sang usize; chỉ số âm đếm từ cuối như Python. Lỗi nếu ngoài phạm vi.
+fn expect_and_normalize_index(v: &Value, len: usize) -> Result<usize, String> {
+    let raw = expect_index(v)?;
+    let n = len as i64;
+    let normalized = if raw < 0 { raw + n } else { raw };
+    if normalized < 0 || normalized as usize >= len {
+        return Err(format!("chỉ số {} ngoài phạm vi (len={})", raw, len));
+    }
+    Ok(normalized as usize)
+}
+
+/// Điều chỉnh start/end của slice theo quy tắc Python (PySlice_AdjustIndices):
+/// xử lý step âm/dương và clamp biên. Trả về (lo, hi) để lặp `i` từ lo tới hi.
+fn adjust_slice(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+    step: i64,
+) -> Result<(i64, i64), String> {
+    if step == 0 {
+        return Err("slice: bước nhảy (step) không được bằng 0".to_string());
+    }
+    let n = len as i64;
+    let mut lo = match start {
+        Some(s) => s,
+        None => {
+            if step > 0 {
+                0
+            } else {
+                n - 1
+            }
+        }
+    };
+    // Mặc định của "end" khi step âm dùng sentinel cực nhỏ (như PY_SSIZE_T_MIN của
+    // CPython) để qua bước chuẩn hóa vẫn về -1 — không nhầm với giá trị do người
+    // dùng cung cấp (vd: a[2:0:-1] dừng đúng ở 0).
+    let mut hi = match end {
+        Some(e) => e,
+        None => {
+            if step > 0 {
+                n
+            } else {
+                i64::MIN
+            }
+        }
+    };
+    if step < 0 {
+        if lo < 0 {
+            lo += n;
+        }
+        if lo < 0 {
+            lo = -1;
+        }
+        if lo >= n {
+            lo = n - 1;
+        }
+        if hi < 0 {
+            hi += n;
+        }
+        if hi < 0 {
+            hi = -1;
+        } else if hi >= n {
+            hi = n - 1;
+        }
+    } else {
+        if lo < 0 {
+            lo += n;
+        }
+        if lo < 0 {
+            lo = 0;
+        }
+        if lo > n {
+            lo = n;
+        }
+        if hi < 0 {
+            hi += n;
+        }
+        if hi < 0 {
+            hi = 0;
+        } else if hi > n {
+            hi = n;
+        }
+    }
+    Ok((lo, hi))
+}
+
 /// Chọn thư mục gốc cho sandbox file I/O.
 ///
 /// Mặc định = thư mục hiện hành (an toàn). Đặt `KINET_SANDBOX_ROOT=/đường/dẫn`
@@ -1855,7 +2097,7 @@ mod tests {
         F: FnOnce() -> Result<(), String> + Send + 'static,
     {
         let handle = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(128 * 1024 * 1024)
             .spawn(f)
             .expect("spawn thread lớn thất bại");
         handle.join().expect("thread panicked")
@@ -2560,6 +2802,166 @@ mod tests {
         let src = "try { let x = 1; }";
         let res = Parser::new(Lexer::new(src).tokenize().unwrap()).parse();
         assert!(res.is_err(), "try không có catch/finally phải báo lỗi cú pháp");
+    }
+
+    // ----- in / slice / comprehension -----
+
+    #[test]
+    fn in_operator_list_string_map() {
+        assert_eq!(
+            run_and_get(r#"let r = 3 in [1, 2, 3];"#, "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = 9 in [1, 2, 3];"#, "r"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = "bc" in "abcd";"#, "r"),
+            Value::Bool(true)
+        );
+        let src = r#"let m = { "x": 1 }; let r = "x" in m;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Bool(true));
+        let src2 = r#"let m = { "x": 1 }; let r = "y" in m;"#;
+        assert_eq!(run_and_get(src2, "r"), Value::Bool(false));
+    }
+
+    #[test]
+    fn not_in_operator() {
+        assert_eq!(
+            run_and_get(r#"let r = 9 not in [1, 2, 3];"#, "r"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_and_get(r#"let r = 1 not in [1, 2, 3];"#, "r"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn in_requires_valid_right_side() {
+        let err = run(r#"let r = 1 in 5;"#).unwrap_err();
+        assert!(err.contains("in"), "lỗi lạ: {}", err);
+    }
+
+    #[test]
+    fn list_slice_matches_python() {
+        let src = r#"
+            let a = [1, 2, 3, 4, 5];
+            let s1 = a[1:4];
+            let s2 = a[:3];
+            let s3 = a[2:];
+            let s4 = a[::-1];
+            let s5 = a[::2];
+            let s6 = a[1:5:2];
+            let s7 = a[4:1:-1];
+            let s8 = a[2:0:-1];
+            let s9 = a[:];
+            let s10 = a[-1:-4:-1];
+            let s11 = a[-100:2];
+            let s12 = a[3:1];
+            let s13 = a[100:];
+            let s14 = a[-2:];
+            let s15 = a[:-2];
+            let s16 = a[2::-1];
+            let out = str(s1) + "|" + str(s2) + "|" + str(s3) + "|" + str(s4)
+                + "|" + str(s5) + "|" + str(s6) + "|" + str(s7) + "|" + str(s8)
+                + "|" + str(s9) + "|" + str(s10) + "|" + str(s11) + "|" + str(s12)
+                + "|" + str(s13) + "|" + str(s14) + "|" + str(s15) + "|" + str(s16);
+        "#;
+        let expected =
+            "[2, 3, 4]|[1, 2, 3]|[3, 4, 5]|[5, 4, 3, 2, 1]|[1, 3, 5]|[2, 4]|[5, 4, 3]|[3, 2]|[1, 2, 3, 4, 5]|[5, 4, 3]|[1, 2]|[]|[]|[4, 5]|[1, 2, 3]|[3, 2, 1]";
+        assert_eq!(run_and_get(src, "out"), Value::Str(expected.into()));
+    }
+
+    #[test]
+    fn string_slice_by_chars() {
+        let src = r#"
+            let s = "xin chào";
+            let r1 = s[0:3];
+            let r2 = s[::-1];
+            let r3 = s[-1];
+        "#;
+        assert_eq!(run_and_get(src, "r1"), Value::Str("xin".into()));
+        assert_eq!(run_and_get(src, "r2"), Value::Str("oàhc nix".into()));
+        assert_eq!(run_and_get(src, "r3"), Value::Str("o".into()));
+    }
+
+    #[test]
+    fn negative_index_for_lists_and_get() {
+        assert_eq!(run_and_get(r#"let r = [1,2,3][-1];"#, "r"), Value::Int(3));
+        assert_eq!(run_and_get(r#"let r = [1,2,3][-3];"#, "r"), Value::Int(1));
+        assert_eq!(run_and_get(r#"let r = get([10, 20, 30], -1);"#, "r"), Value::Int(30));
+        // Gán vào ô âm
+        assert_eq!(
+            run_and_get(r#"let a = [1,2,3]; a[-1] = 99; let r = a[2];"#, "r"),
+            Value::Int(99)
+        );
+    }
+
+    #[test]
+    fn negative_index_out_of_range_errors() {
+        assert!(run(r#"let r = [1,2][-5];"#).is_err());
+        assert!(run(r#"let r = [1,2][5];"#).is_err());
+        assert!(run(r#"let r = "abc"[-4];"#).is_err());
+    }
+
+    #[test]
+    fn slice_step_zero_errors() {
+        let src = r#"let a = [1,2,3]; let r = a[::0];"#;
+        assert!(run(src).is_err());
+    }
+
+    #[test]
+    fn slice_on_map_errors() {
+        let src = r#"let m = { "a": 1 }; let r = m[0:2];"#;
+        assert!(run(src).is_err());
+    }
+
+    #[test]
+    fn list_comprehension_basic_and_filter() {
+        assert_eq!(
+            run_and_get("let r = [x * x for x in range(0, 6)];", "r"),
+            Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(4), Value::Int(9), Value::Int(16), Value::Int(25)])
+        );
+        assert_eq!(
+            run_and_get("let r = [x for x in range(0, 10) if x % 2 == 0];", "r"),
+            Value::List(vec![Value::Int(0), Value::Int(2), Value::Int(4), Value::Int(6), Value::Int(8)])
+        );
+    }
+
+    #[test]
+    fn list_comprehension_over_list_and_nested() {
+        assert_eq!(
+            run_and_get(r#"let r = [to_upper(x) for x in ["a", "b"]];"#, "r"),
+            Value::List(vec![Value::Str("A".into()), Value::Str("B".into())])
+        );
+        // Nhiều vòng: phép nhân kiểu Python
+        assert_eq!(
+            run_and_get("let r = [x + y for x in [1, 2] for y in [10, 20]];", "r"),
+            Value::List(vec![Value::Int(11), Value::Int(21), Value::Int(12), Value::Int(22)])
+        );
+    }
+
+    #[test]
+    fn dict_comprehension() {
+        let src = "let m = { i: i * i for i in range(1, 4) }; let r = get(m, 2);";
+        assert_eq!(run_and_get(src, "r"), Value::Int(4));
+        assert_eq!(run_and_get(src, "m"), Value::Map(
+            [(Value::Int(1), Value::Int(1)), (Value::Int(2), Value::Int(4)), (Value::Int(3), Value::Int(9))]
+                .into_iter()
+                .collect()
+        ));
+    }
+
+    #[test]
+    fn comprehension_variable_does_not_leak() {
+        // Biến `x` trong comprehension không rò ra ngoài (scope riêng).
+        let src = "let x = 100; let r = [x for x in range(0, 3)]; let y = x;";
+        assert_eq!(run_and_get(src, "y"), Value::Int(100));
+        assert_eq!(run_and_get(src, "r"), Value::List(
+            vec![Value::Int(0), Value::Int(1), Value::Int(2)]
+        ));
     }
 
     // ----- float -----

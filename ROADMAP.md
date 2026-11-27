@@ -53,7 +53,7 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 - [ ] Namespace / thư mục stdlib riêng
 
 ### B2 — Kiểu + ngữ nghĩa  (≈ 4–5 buổi)
-- [ ] `float`, ký tự riêng, `null` rõ ràng
+- [x] `float` (đã trộn với int), slice `a[i:j:k]`, chỉ số âm `a[-1]`, `in`, comprehension (2026-11-27)
 - [ ] Tuple / struct nhẹ (map có khoá cố định + validate)
 
 ### B3 — Xử lý lỗi  (≈ 3 buổi)
