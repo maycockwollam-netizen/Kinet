@@ -142,7 +142,12 @@ impl Parser {
 
     fn return_stmt(&mut self) -> Result<Stmt, String> {
         self.advance(); // return
-        let expr = self.expression()?;
+        // `return;` không giá trị = trả về Nil.
+        let expr = if self.check(&TokenKind::Semi) {
+            Expr::Nil
+        } else {
+            self.expression()?
+        };
         self.expect_semi("return")?;
         Ok(Stmt::Return(expr))
     }

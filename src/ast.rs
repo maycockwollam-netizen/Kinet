@@ -23,6 +23,7 @@ pub enum Expr {
     Number(i64),
     Str(String),
     Bool(bool),
+    Nil,
     Variable(String),
     Assign {
         name: String,

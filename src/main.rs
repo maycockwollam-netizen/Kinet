@@ -247,6 +247,7 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
         Expr::Number(n) => out.push_str(&n.to_string()),
         Expr::Str(s) => out.push_str(&format!("\"{}\"", s)),
         Expr::Bool(b) => out.push_str(&b.to_string()),
+        Expr::Nil => out.push_str("nil"),
         Expr::Variable(name) => out.push_str(name),
         Expr::Assign { name, value } => {
             out.push_str(name);

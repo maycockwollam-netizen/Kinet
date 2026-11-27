@@ -6,6 +6,7 @@
 //!   Flow   = tín hiệu điều khiển (return) trong khi chạy
 
 use std::collections::HashMap;
+use std::io::Write;
 
 use crate::ast::{Expr, Pattern, Stmt};
 use crate::token::TokenKind;
@@ -117,6 +118,9 @@ enum Flow {
 pub struct Interpreter {
     globals: EnvRef,
     call_depth: usize,
+    // Ngân sách thực thi: đếm mỗi câu lệnh đã chạy, chống vòng lặp vô hạn.
+    steps: u64,
+    max_steps: u64,
 }
 
 //: Giới hạn độ sâu gọi hàm tránh stack overflow. Main chạy trên thread 64MB
@@ -127,6 +131,10 @@ const MAX_CALL_DEPTH: usize = 2000;
 const STACK_MARKER: &str = "  ↳ tại hàm ";
 // Giới hạn số frame hiển thị để tránh phình khi đệ quy sâu.
 const MAX_STACK_FRAMES: usize = 30;
+// Ngân sách mặc định: số câu lệnh tối đa mỗi lần run() (chống vòng lặp vô hạn).
+const DEFAULT_MAX_STEPS: u64 = 20_000_000;
+// Giới hạn số phần tử tối đa mà range() được phép tạo (chống ăn hết RAM).
+const MAX_RANGE_LEN: i64 = 5_000_000;
 
 /// Thêm một frame (tên hàm) vào cuối thông báo lỗi, nếu chưa đủ frame.
 fn annotate_stack(mut err: String, fn_name: &str) -> String {
@@ -176,6 +184,8 @@ impl Interpreter {
         Self {
             globals,
             call_depth: 0,
+            steps: 0,
+            max_steps: DEFAULT_MAX_STEPS,
         }
     }
 
@@ -207,7 +217,21 @@ impl Interpreter {
         Ok(Flow::Normal)
     }
 
+    /// Đếm một bước thực thi và kiểm tra ngân sách (chống vòng lặp vô hạn).
+    fn tick(&mut self) -> Result<(), String> {
+        self.steps += 1;
+        if self.steps > self.max_steps {
+            return Err(format!(
+                "Quá ngân sách thực thi ({} bước) — có thể là vòng lặp vô hạn",
+                self.max_steps
+            ));
+        }
+        Ok(())
+    }
+
     fn exec(&mut self, stmt: &Stmt, env: EnvRef) -> Result<Flow, String> {
+        // Ngân sách thực thi: chống vòng lặp vô hạn (while true v.v.).
+        self.tick()?;
         match stmt {
             Stmt::Expr(e) => {
                 self.eval(e, env)?;
@@ -221,6 +245,8 @@ impl Interpreter {
             Stmt::Print(exprs) => {
                 let text = self.join_printed(exprs, env)?;
                 print!("{}", text);
+                // print không xuống dòng — cần flush để kết quả hiện kịp khi chạy file.
+                let _ = std::io::stdout().flush();
                 Ok(Flow::Normal)
             }
             Stmt::Println(exprs) => {
@@ -239,15 +265,23 @@ impl Interpreter {
                 } else {
                     else_branch
                 };
-                self.exec_block(branch, env)
+                // Nhất quán với for/match: mỗi block if có scope riêng,
+                // biến khai báo trong if không rò ra ngoài.
+                let scope = std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                self.exec_block(branch, scope)
             }
             Stmt::While { cond, body } => {
                 loop {
+                    // Mỗi vòng lặp là một bước (kể cả body rỗng) — chống treo vô hạn.
+                    self.tick()?;
                     let cond_value = self.eval(cond, env.clone())?;
                     if !self.truthy(&cond_value) {
                         break;
                     }
-                    match self.exec_block(body, env.clone())? {
+                    // Nhất quán với for: mỗi lần lặp có scope riêng.
+                    let scope =
+                        std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                    match self.exec_block(body, scope)? {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         Flow::Break => break,
                         Flow::Continue | Flow::Normal => {}
@@ -265,6 +299,7 @@ impl Interpreter {
                 };
                 for item in items {
                     // Biến lặp chỉ tồn tại trong body.
+                    self.tick()?;
                     let scope =
                         std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
                     scope.borrow_mut().define(var, item);
@@ -304,6 +339,7 @@ impl Interpreter {
             Expr::Number(n) => Ok(Value::Int(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
+            Expr::Nil => Ok(Value::Nil),
             Expr::Variable(name) => env.borrow().get(name),
             Expr::Assign { name, value } => {
                 let v = self.eval(value, env.clone())?;
@@ -751,7 +787,8 @@ fn native_substring(args: &[Value]) -> Result<Value, String> {
             start, n
         ));
     }
-    let end = (start + len).min(n);
+    // saturating_add tránh tràn số khi len rất lớn.
+    let end = start.saturating_add(len).min(n);
     Ok(Value::Str(chars[start as usize..end as usize].iter().collect()))
 }
 
@@ -785,13 +822,7 @@ fn native_list_join(args: &[Value]) -> Result<Value, String> {
     let Value::Str(sep) = &args[1] else {
         return Err("list_join() cần dấu phân tách là chuỗi".to_string());
     };
-    let strings: Vec<String> = items
-        .iter()
-        .map(|v| match v {
-            Value::Str(sv) => sv.clone(),
-            other => format!("{:?}", other),
-        })
-        .collect();
+    let strings: Vec<String> = items.iter().map(stringify_value).collect();
     Ok(Value::Str(strings.join(sep)))
 }
 
@@ -802,9 +833,15 @@ fn native_ord(args: &[Value]) -> Result<Value, String> {
     let Value::Str(s) = &args[0] else {
         return Err("ord() cần chuỗi 1 ký tự".to_string());
     };
-    match s.chars().next() {
-        Some(c) => Ok(Value::Int(c as i64)),
-        None => Err("ord(): chuỗi rỗng".to_string()),
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(Value::Int(c as i64)),
+        (None, _) => Err("ord(): chuỗi rỗng".to_string()),
+        (Some(_), Some(_)) => Err(format!(
+            "ord(): cần đúng 1 ký tự, nhận '{}' ({} ký tự)",
+            s,
+            s.chars().count()
+        )),
     }
 }
 
@@ -830,7 +867,8 @@ fn native_read_file(args: &[Value]) -> Result<Value, String> {
     let Value::Str(path) = &args[0] else {
         return Err("read_file() cần chuỗi đường dẫn".to_string());
     };
-    let content = std::fs::read_to_string(path)
+    let resolved = sandboxed_path(path)?;
+    let content = std::fs::read_to_string(&resolved)
         .map_err(|e| format!("read_file('{}') thất bại: {}", path, e))?;
     Ok(Value::Str(content))
 }
@@ -845,7 +883,8 @@ fn native_write_file(args: &[Value]) -> Result<Value, String> {
     let Value::Str(content) = &args[1] else {
         return Err("write_file() cần nội dung là chuỗi".to_string());
     };
-    std::fs::write(path, content)
+    let resolved = sandboxed_path(path)?;
+    std::fs::write(&resolved, content)
         .map_err(|e| format!("write_file('{}') thất bại: {}", path, e))?;
     Ok(Value::Bool(true))
 }
@@ -864,18 +903,39 @@ fn native_range(args: &[Value]) -> Result<Value, String> {
     if step == 0 {
         return Err("range(): step không được bằng 0".to_string());
     }
+    // Ước lượng số phần tử để chặn range quá lớn (tránh ăn hết RAM).
+    let count = if step > 0 && start < end {
+        (end - start).saturating_add(step - 1) / step
+    } else if step < 0 && start > end {
+        (start - end).saturating_add(-(step + 1)) / (-step)
+    } else {
+        0
+    };
+    if count > MAX_RANGE_LEN {
+        return Err(format!(
+            "range(): quá lớn (~{} phần tử, giới hạn {}) — nghi ngờ sai phạm vi",
+            count, MAX_RANGE_LEN
+        ));
+    }
+
     let mut out = Vec::new();
+    let mut i = start;
     if step > 0 {
-        let mut i = start;
         while i < end {
             out.push(Value::Int(i));
-            i += step;
+            // checked_add để tránh tràn số khi end gần i64::MAX.
+            match i.checked_add(step) {
+                Some(next) => i = next,
+                None => break,
+            }
         }
     } else {
-        let mut i = start;
         while i > end {
             out.push(Value::Int(i));
-            i += step;
+            match i.checked_add(step) {
+                Some(next) => i = next,
+                None => break,
+            }
         }
     }
     Ok(Value::List(out))
@@ -959,6 +1019,70 @@ fn expect_int(v: &Value, fname: &str) -> Result<i64, String> {
     match v {
         Value::Int(n) => Ok(*n),
         _ => Err(format!("{}() cần đối số là số nguyên", fname)),
+    }
+}
+
+/// Giải quyết đường dẫn cho read_file/write_file.
+///
+/// Nếu biến môi trường `KINET_SANDBOX_ROOT` được đặt, mọi đường dẫn phải nằm
+/// trong thư mục đó (không thoát ra ngoài bằng `..` hay đường dẫn tuyệt đối).
+/// Nếu không đặt biến → tự do (mặc định, phù hợp khi dùng cho script của mình).
+fn sandboxed_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let Ok(root) = std::env::var("KINET_SANDBOX_ROOT") else {
+        return Ok(std::path::PathBuf::from(raw));
+    };
+    let root_path = std::path::PathBuf::from(&root);
+    // Đường dẫn tuyệt đối được xem là tương đối với root.
+    let rel: &str = raw.strip_prefix('/').unwrap_or(raw);
+    let mut out = root_path.clone();
+    let mut depth: i64 = 0; // độ sâu tính từ root
+    for comp in std::path::Path::new(rel).components() {
+        match comp {
+            std::path::Component::Normal(c) => {
+                depth += 1;
+                out.push(c);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // `..` ở độ sâu 0 nghĩa là muốn thoát khỏi root → chặn.
+                if depth <= 0 {
+                    return Err(format!(
+                        "Không được vượt ra ngoài sandbox root '{}'",
+                        root
+                    ));
+                }
+                depth -= 1;
+                out.pop();
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("Đường dẫn tuyệt đối bị chặn trong sandbox".to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Chuyển một Value thành chuỗi hiển thị (dùng trong list_join và những chỗ
+/// không có sẵn Interpreter::to_string).
+fn stringify_value(v: &Value) -> String {
+    match v {
+        Value::Int(n) => n.to_string(),
+        Value::Str(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::List(items) => {
+            let inner: Vec<String> = items.iter().map(stringify_value).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Map(entries) => {
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(k, val)| format!("{}: {}", stringify_value(k), stringify_value(val)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        Value::Func(f) => format!("<hàm {}>", f.name),
+        Value::Native(n) => format!("<hàm {}>", n.name),
+        Value::Nil => "nil".to_string(),
     }
 }
 
@@ -1300,6 +1424,87 @@ mod tests {
     fn substring_out_of_range_errors() {
         let err = run(r#"let s = substring("abc", 9, 1);"#).unwrap_err();
         assert!(err.contains("ngoài phạm vi"));
+    }
+
+    // ----- Hồi quy từ audit an toàn/sai sót -----
+
+    #[test]
+    fn list_join_uses_kinet_strings_not_debug() {
+        assert_eq!(
+            run_and_get(r#"let j = list_join([1, 2, 3], ",");"#, "j"),
+            Value::Str("1,2,3".into())
+        );
+        assert_eq!(
+            run_and_get(r#"let j = list_join(["a", 1, true], "-");"#, "j"),
+            Value::Str("a-1-true".into())
+        );
+    }
+
+    #[test]
+    fn ord_rejects_multichar() {
+        let err = run(r#"let c = ord("abc");"#).unwrap_err();
+        assert!(err.contains("đúng 1 ký tự"));
+    }
+
+    #[test]
+    fn substring_does_not_overflow() {
+        // len khổng lồ không được tràn số hay panic — chỉ cắt tới hết chuỗi.
+        assert_eq!(
+            run_and_get(r#"let s = substring("abc", 1, 9223372036854775807);"#, "s"),
+            Value::Str("bc".into())
+        );
+    }
+
+    #[test]
+    fn range_near_max_no_overflow() {
+        // Không được panic khi i += step chạm i64::MAX.
+        let len = run_and_get(
+            "let n = len(range(9223372036854775806, 9223372036854775807));",
+            "n",
+        );
+        assert_eq!(len, Value::Int(1));
+    }
+
+    #[test]
+    fn range_too_big_rejected() {
+        let err = run("let r = range(0, 10000000);").unwrap_err();
+        assert!(err.contains("quá lớn"));
+    }
+
+    #[test]
+    fn execution_budget_stops_infinite_loop() {
+        let mut it = Interpreter::new();
+        it.max_steps = 200;
+        let err = it.run(&program("while true { }")).unwrap_err();
+        assert!(err.contains("ngân sách"));
+    }
+
+    #[test]
+    fn if_block_does_not_leak_variable() {
+        let err = run("if true { let x = 5; } println(x);").unwrap_err();
+        assert!(err.contains("Chưa khai báo biến"));
+    }
+
+    #[test]
+    fn while_block_does_not_leak_variable() {
+        let src = "let s = 0; while s < 2 { let t = 1; s = s + 1; } println(t);";
+        let err = run(src).unwrap_err();
+        assert!(err.contains("Chưa khai báo biến"));
+    }
+
+    #[test]
+    fn while_can_still_mutate_outer_via_assignment() {
+        // Gán (không khai báo let) vào biến ngoài vẫn hoạt động trong scope con.
+        assert_eq!(
+            run_and_get("let total = 0; let i = 0; while i < 5 { total = total + i; i = i + 1; }", "total"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn bare_return_returns_nil() {
+        let src = "func f() { return; } let v = f();";
+        assert_eq!(run_and_get(src, "v"), Value::Nil);
     }
 
     #[test]

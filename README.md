@@ -123,6 +123,13 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 
 → Nghĩa là mày có thể dùng Kinet để viết trình thông dịch/ngôn ngữ khác, công cụ, thư viện... đúng tinh thần "tạo gì cũng được, miễn có trình".
 
+## Giới hạn & bảo mật
+- **Ngân sách thực thi**: mặc định 20 triệu bước mỗi `run()` — chống `while true` vô hạn.
+- **`range()`**: tối đa 5 triệu phần tử — chống ăn hết RAM.
+- **Sandbox file I/O** (tùy chọn): đặt env `KINET_SANDBOX_ROOT=/đường/dẫn` để khóa `read_file`/`write_file` nằm trong thư mục đó (chặn `..` và đường dẫn tuyệt đối). Không đặt → `read_file`/`write_file` tự do.
+- **Scope nhất quán**: `if`/`while`/`for`/`match` đều tạo scope riêng — `let` trong block không rò ra ngoài; còn gán `=` vào biến ngoài thì vẫn được.
+- **`return;`** (không giá trị) trả về `nil`.
+
 ## Cấu trúc code
 
 | Module | Vai trò |
@@ -140,11 +147,11 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - [x] `for` loop + `break`/`continue`
 - [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
 - [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
-- [x] Unit test (53 test: lexer, parser, interpreter)
+- [x] Unit test (65 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
 - [x] **Mốc 4:** Kiểu `map`, file I/O, `chars`/`ord`/`to_int`, đệ quy sâu 2000 — đủ lập trình đa dụng; có `mini_interp.kinet` (viết trình thông dịch bằng Kinet)
 - [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`)
 - [x] **Giai đoạn A (phần 2):** stack trace khi lỗi (hiện chuỗi hàm gọi `a → b → c`)
+- [x] **Bảo mật & độ chắc:** ngân sách thực thi (chống `while true`), cap `range()`, `return;`, scope nhất quán, sandbox file I/O qua `KINET_SANDBOX_ROOT`, sửa overflow `range`/`substring`, `list_join` đúng chuỗi
 - [ ] Giai đoạn A (phần 3): template chuỗi `${x}`
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
-- [ ] Sandbox + bảo mật (giới hạn quyền truy cập)
