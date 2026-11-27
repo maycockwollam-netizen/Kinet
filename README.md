@@ -105,6 +105,8 @@ println(a[1], m["y"]);         // đọc mục — kể cả lồng: grid[r][c]
 | `to_int(x)` | số/chuỗi → số nguyên | `to_int("42")` → `42`, `to_int(3.9)` → `3` |
 | `to_float(x)` | số/chuỗi → số thập phân | `to_float("3.14")` → `3.14` |
 | `str(x)` | mọi giá trị → chuỗi | `str({ "a": 1 })` → `"{a: 1}"` |
+| `round(x)` / `floor(x)` / `ceil(x)` | làm tròn số | `round(2.6)` → `3` |
+| `abs(x)` | giá trị tuyệt đối | `abs(-7)` → `7` |
 | `exists(p)` | đường dẫn có tồn tại? | `exists("a.txt")` → `true` |
 | `append_file(p, s)` | ghi THÊM vào file | `append_file("log.txt", "x")` |
 | `list_dir(p)` | liệt kê tên file (sắp xếp) | `list_dir(".")` |
@@ -125,7 +127,7 @@ let status = match result {
 Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e => ...`), wildcard (`_` / `default`). Nhánh đầu tiên khớp sẽ thắng — thứ tự quan trọng.
 
 ### Toán tử
-- Số học: `+ - * / %` (có `+` cho chuỗi — nối kiểu)
+- Số học: `+ - * / %` (có `+` cho chuỗi — nối kiểu; `*` lặp chuỗi: `"ab" * 3` → `"ababab"`)
 - So sánh: `== != < > <= >=`
 - Bit: `& | << >>` (chỉ số nguyên)
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)

@@ -276,6 +276,10 @@ impl Interpreter {
                 ("to_int", native_to_int as fn(&[Value]) -> Result<Value, String>),
                 ("to_float", native_to_float as fn(&[Value]) -> Result<Value, String>),
                 ("str", native_str as fn(&[Value]) -> Result<Value, String>),
+                ("round", native_round as fn(&[Value]) -> Result<Value, String>),
+                ("floor", native_floor as fn(&[Value]) -> Result<Value, String>),
+                ("ceil", native_ceil as fn(&[Value]) -> Result<Value, String>),
+                ("abs", native_abs as fn(&[Value]) -> Result<Value, String>),
                 ("ord", native_ord as fn(&[Value]) -> Result<Value, String>),
                 ("substring", native_substring as fn(&[Value]) -> Result<Value, String>),
                 ("to_upper", native_to_upper as fn(&[Value]) -> Result<Value, String>),
@@ -694,7 +698,16 @@ impl Interpreter {
                 }
             }
             TokenKind::Minus => self.num_arith(&lv, &rv, op),
-            TokenKind::Star => self.num_arith(&lv, &rv, op),
+            TokenKind::Star => {
+                // "ab" * 3 → "ababab" (và 3 * "ab" → "ababab")
+                if let (Value::Str(s), Value::Int(n)) = (&lv, &rv) {
+                    return self.repeat_str(s, *n);
+                }
+                if let (Value::Int(n), Value::Str(s)) = (&lv, &rv) {
+                    return self.repeat_str(s, *n);
+                }
+                self.num_arith(&lv, &rv, op)
+            }
             TokenKind::Slash => self.num_arith(&lv, &rv, op),
             TokenKind::Percent => self.num_arith(&lv, &rv, op),
             TokenKind::Eq => Ok(Value::Bool(lv == rv)),
@@ -797,6 +810,15 @@ impl Interpreter {
                 Ok(Value::Float(result))
             }
         }
+    }
+
+    fn repeat_str(&self, s: &str, n: i64) -> Result<Value, String> {
+        if n < 0 {
+            return Err("lặp chuỗi ('*') không được dùng số âm".to_string());
+        }
+        let total = s.chars().count().saturating_mul(n as usize);
+        check_len("chuỗi lặp", total, MAX_STR_CHARS)?;
+        Ok(Value::Str(s.repeat(n as usize)))
     }
 
     fn as_f64(&self, v: &Value, op: &TokenKind) -> Result<f64, String> {
@@ -1177,6 +1199,50 @@ fn native_str(args: &[Value]) -> Result<Value, String> {
         return Err("str() cần 1 đối số".to_string());
     }
     Ok(Value::Str(stringify_value(&args[0])))
+}
+
+fn native_round(args: &[Value]) -> Result<Value, String> {
+    one_number(args, "round", |f| f.round())
+}
+
+fn native_floor(args: &[Value]) -> Result<Value, String> {
+    one_number(args, "floor", |f| f.floor())
+}
+
+fn native_ceil(args: &[Value]) -> Result<Value, String> {
+    one_number(args, "ceil", |f| f.ceil())
+}
+
+fn native_abs(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("abs() cần 1 đối số".to_string());
+    }
+    match &args[0] {
+        Value::Int(n) => n
+            .checked_abs()
+            .map(Value::Int)
+            .ok_or_else(|| "abs(): tràn số với i64::MIN".to_string()),
+        Value::Float(f) => Ok(Value::Float(f.abs())),
+        _ => Err("abs() cần số".to_string()),
+    }
+}
+
+/// Giúp round/floor/ceil: chuyển int/float → áp hàm → trả Int.
+fn one_number(args: &[Value], name: &str, op: fn(f64) -> f64) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err(format!("{}() cần 1 đối số", name));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Float(f) => {
+            if f.is_finite() {
+                Ok(Value::Int(op(*f) as i64))
+            } else {
+                Err(format!("{}(): số không hữu hạn", name))
+            }
+        }
+        _ => Err(format!("{}() cần số", name)),
+    }
 }
 
 fn native_substring(args: &[Value]) -> Result<Value, String> {
@@ -2451,6 +2517,37 @@ mod tests {
     #[test]
     fn escape_carriage_return() {
         assert_eq!(run_and_get(r#"let x = len("a\rb");"#, "x"), Value::Int(3));
+    }
+
+    // ----- Nâng cấp: trailing comma, lặp chuỗi, round/floor/ceil/abs -----
+
+    #[test]
+    fn trailing_comma_in_literals() {
+        let src = r#"let l = [1, 2, 3,];
+            let m = { "a": 1, "b": 2, };"#;
+        assert_eq!(run_and_get(src, "l"), Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        assert_eq!(run_and_get(src, "m"), Value::Map(indexmap::IndexMap::from([
+            (Value::Str("a".into()), Value::Int(1)),
+            (Value::Str("b".into()), Value::Int(2)),
+        ])));
+    }
+
+    #[test]
+    fn string_repeat_star() {
+        assert_eq!(run_and_get(r#"let s = "ab" * 3;"#, "s"), Value::Str("ababab".into()));
+        assert_eq!(run_and_get(r#"let s = 2 * "x";"#, "s"), Value::Str("xx".into()));
+        assert_eq!(run_and_get(r#"let s = "-" * 0;"#, "s"), Value::Str("".into()));
+        let err = run(r#"let s = "a" * -1;"#).unwrap_err();
+        assert!(err.contains("số âm") || err.contains("quá lớn"));
+    }
+
+    #[test]
+    fn round_floor_ceil_abs() {
+        assert_eq!(run_and_get("let x = round(2.6);", "x"), Value::Int(3));
+        assert_eq!(run_and_get("let x = floor(2.9);", "x"), Value::Int(2));
+        assert_eq!(run_and_get("let x = ceil(2.1);", "x"), Value::Int(3));
+        assert_eq!(run_and_get("let x = abs(-7);", "x"), Value::Int(7));
+        assert_eq!(run_and_get("let x = abs(-2.5);", "x"), Value::Float(2.5));
     }
 
     #[test]

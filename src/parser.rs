@@ -366,6 +366,9 @@ impl Parser {
                         if !self.match_or(TokenKind::Comma) {
                             break;
                         }
+                        if self.check(&TokenKind::RBracket) {
+                            break; // dấu phẩy cuối — cho phép
+                        }
                     }
                     self.consume(TokenKind::RBracket, "mong đợi ']' sau danh sách")?;
                 }
@@ -393,6 +396,9 @@ impl Parser {
             entries.push((key, value));
             if !self.match_or(TokenKind::Comma) {
                 break;
+            }
+            if self.check(&TokenKind::RBrace) {
+                break; // dấu phẩy cuối — cho phép
             }
         }
         self.consume(TokenKind::RBrace, "mong đợi '}' để đóng dict")?;
