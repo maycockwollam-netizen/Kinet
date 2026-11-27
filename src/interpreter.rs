@@ -448,6 +448,24 @@ impl Interpreter {
                     Err(e) => Err(format!("{} (từ file import '{}')", e, path)),
                 }
             }
+            Stmt::Try {
+                body,
+                catch_var,
+                catch_body,
+            } => {
+                // Chỉ bắt lỗi runtime (Err); return/break/continue vẫn đi qua.
+                match self.exec_block(body, env.clone()) {
+                    Ok(flow) => Ok(flow),
+                    Err(error_msg) => {
+                        let scope =
+                            std::rc::Rc::new(std::cell::RefCell::new(Env::child(env.clone())));
+                        if let Some(var) = catch_var {
+                            scope.borrow_mut().define(var, Value::Str(error_msg));
+                        }
+                        self.exec_block(catch_body, scope)
+                    }
+                }
+            }
             Stmt::Func {
                 name,
                 params,
@@ -1955,6 +1973,40 @@ mod tests {
         // Lỗi trong file import phải ghi tên file.
         assert!(err2.contains("từ file import"), "thiếu tên file: {}", err2);
         let _ = std::fs::remove_file(&lib);
+    }
+
+    // ----- try / catch -----
+
+    #[test]
+    fn try_catch_binds_error_message() {
+        let src = r#"let got = "";
+            try { let x = 1 / 0; } catch e { got = e; }
+            let caught = len(got) > 0;"#;
+        assert_eq!(run_and_get(src, "caught"), Value::Bool(true));
+    }
+
+    #[test]
+    fn try_without_error_skips_catch() {
+        let src = "let val = 0; try { val = 5; } catch e { val = -1; }";
+        assert_eq!(run_and_get(src, "val"), Value::Int(5));
+    }
+
+    #[test]
+    fn catch_without_binding_runs() {
+        let src = "let val = 0; try { let x = 1 / 0; } catch { val = 9; }";
+        assert_eq!(run_and_get(src, "val"), Value::Int(9));
+    }
+
+    #[test]
+    fn return_inside_try_propagates() {
+        let src = "func f() { try { return 42; } catch e { return 0; } } let v = f();";
+        assert_eq!(run_and_get(src, "v"), Value::Int(42));
+    }
+
+    #[test]
+    fn caught_error_message_has_content() {
+        let src = r#"let msg = ""; try { let x = 1 / 0; } catch e { msg = e; } let has = contains(msg, "Chia cho 0");"#;
+        assert_eq!(run_and_get(src, "has"), Value::Bool(true));
     }
 
     #[test]

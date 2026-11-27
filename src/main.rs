@@ -206,6 +206,23 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             p_indent(out, indent);
             out.push_str(&format!("import \"{}\"\n", path));
         }
+        Stmt::Try {
+            body,
+            catch_var,
+            catch_body,
+        } => {
+            p_indent(out, indent);
+            out.push_str("try\n");
+            p_stmts(body, indent + 1, out);
+            p_indent(out, indent);
+            out.push_str("catch");
+            if let Some(v) = catch_var {
+                out.push(' ');
+                out.push_str(v);
+            }
+            out.push('\n');
+            p_stmts(catch_body, indent + 1, out);
+        }
         Stmt::Continue => {
             p_indent(out, indent);
             out.push_str("continue\n");

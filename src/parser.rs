@@ -53,6 +53,7 @@ impl Parser {
             TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
             TokenKind::Import => self.import_stmt(),
+            TokenKind::Try => self.try_stmt(),
             TokenKind::Break => {
                 self.advance();
                 self.expect_semi("break")?;
@@ -128,6 +129,28 @@ impl Parser {
         };
         self.expect_semi("import")?;
         Ok(Stmt::Import(path))
+    }
+
+    fn try_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // try
+        let body = self.block()?;
+        self.consume(TokenKind::Catch, "mong đợi 'catch' sau khối try")?;
+        let catch_var = if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            let token = self.advance();
+            if let TokenKind::Ident(name) = token.kind {
+                Some(name)
+            } else {
+                unreachable!()
+            }
+        } else {
+            None
+        };
+        let catch_body = self.block()?;
+        Ok(Stmt::Try {
+            body,
+            catch_var,
+            catch_body,
+        })
     }
 
     fn if_stmt(&mut self) -> Result<Stmt, String> {

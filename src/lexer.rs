@@ -185,6 +185,8 @@ impl Lexer {
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "import" => TokenKind::Import,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
             "match" => TokenKind::Match,
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,

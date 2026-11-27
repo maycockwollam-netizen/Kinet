@@ -25,6 +25,8 @@ pub enum TokenKind {
     Break,
     Continue,
     Import,
+    Try,
+    Catch,
     Print,
     Println,
     Match,

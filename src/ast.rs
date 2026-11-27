@@ -87,6 +87,11 @@ pub enum Stmt {
     Break,
     Continue,
     Import(String),
+    Try {
+        body: Vec<Stmt>,
+        catch_var: Option<String>,
+        catch_body: Vec<Stmt>,
+    },
     Func {
         name: String,
         params: Vec<String>,
