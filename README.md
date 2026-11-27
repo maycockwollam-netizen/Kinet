@@ -109,38 +109,6 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)
 - Phép gán: `=`
 
-## Gọi agent Kinetic SDK thật (Mốc 3)
-
-Kinet có native function `agent_run(goal)` để chạy agent Kinetic SDK thật, qua bridge Python ở `bridge/kinet_agent.py`:
-
-```c
-// goal-completion loop: hàm viết bằng Kinet, agent chạy SDK thật bên trong
-func run_agent(goal, max_rounds) {
-    for round in range(0, max_rounds) {
-        let result = agent_run(goal);              // gọi Agent(...).run(goal)
-        if starts_with(result, "goal complete") {
-            return round + 1;
-        }
-    }
-    return 0;
-}
-```
-
-Chạy demo: `cargo run -- examples/agent_real.kinet`
-
-Ví dụ **script agent đời thực**: `cargo run -- examples/sdk_workflow.kinet` — đọc danh sách
-task từ file → chạy agent thật từng task → gom kết quả vào list các map → ghi báo cáo ra file.
-
-### Cấu hình biến môi trường
-| Biến | Ý nghĩa | Mặc định |
-|---|---|---|
-| `KINET_SDK_DIR` | thư mục chứa gói `kinetic_sdk` | `/tmp/kinetic-sdk` |
-| `KINET_BRIDGE` | đường dẫn `kinet_agent.py` | `bridge/kinet_agent.py` |
-| `OPENAI_API_KEY` | nếu có → dùng `LiteLLMClient` (LLM thật) | không có → `MockLLMClient` offline |
-| `KINET_MODEL` | model khi dùng LLM thật | `gpt-4o-mini` |
-
-> `agent_run` hiện gọi bridge Python qua tiến trình (`std::process::Command`, không dùng shell nên tránh được injection). Bước nâng cấp tiếp theo là embed trực tiếp qua PyO3 (như `_kinetic_rs` của SDK) để bỏ chi phí spawn tiến trình mỗi lần gọi.
-
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:
@@ -174,10 +142,8 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 - [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
 - [x] Unit test (53 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
-- [x] **Mốc 3:** Kinet điều khiển agent Kinetic SDK thật (agent_run → bridge Python)
 - [x] **Mốc 4:** Kiểu `map`, file I/O, `chars`/`ord`/`to_int`, đệ quy sâu 2000 — đủ lập trình đa dụng; có `mini_interp.kinet` (viết trình thông dịch bằng Kinet)
-- [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`), `sdk_workflow.kinet` script agent đời thực
-- [ ] Giai đoạn A (phần 2): template chuỗi, bridge có cấu trúc + giữ tiến trình, stack trace
-- [ ] Nâng bridge lên embed PyO3 trực tiếp (bỏ spawn tiến trình)
+- [x] **Giai đoạn A (phần 1):** dict literal `{...}`, comment khối `/* */`, helpers (`substring`, `to_upper`, `to_lower`, `list_join`)
+- [ ] Giai đoạn A (phần 2): template chuỗi, stack trace
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

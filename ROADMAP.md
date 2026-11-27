@@ -1,7 +1,7 @@
 # ROADMAP — Lịch trình phát triển Kinet thành ngôn ngữ thật
 
-> Mục tiêu: từ ngôn ngữ nhỏ hiện tại → ngôn ngữ script **Sài được thật** để điều
-> khiển Kinetic SDK của mình, rồi mới xa hơn.
+> Mục tiêu: từ ngôn ngữ nhỏ hiện tại → ngôn ngữ script **Sài được thật** cho
+> các tác vụ của mình, rồi mới xa hơn.
 >
 > Ước lượng theo "ngày làm đều" (nửa ngày / buổi). Càng về sau càng mở — điều
 > chỉnh theo tốc độ và nhu cầu.
@@ -11,8 +11,7 @@
 |---|---|
 | M1 match, list, native | ✅ |
 | M2 for/break/continue, string funcs | ✅ |
-| M3 agent_run gọi SDK thật (bridge thô) | ✅ |
-| M4 map, file I/O, đệ quy sâu, mini_interp | ✅ |
+| M3 map, file I/O, đệ quy sâu, mini_interp | ✅ |
 
 ---
 
@@ -26,17 +25,15 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 - [ ] `for i in range(...)` tiện hơn (đã có), `for key in map_keys(m)`
 - [ ] Comments khối `/* ... */`, dòng lệnh `;` không bắt buộc cuối block
 
-### A2 — Bridge thật (có cấu trúc + giữ tiến trình)  (≈ 3–4 buổi)
-- [ ] Giữ 1 tiến trình Python sống giữa các lần gọi (đọc/ghi qua stdin/stdout)
-- [ ] `agent_run(config_map)` → trả `{output, tool_calls, duration, token_usage}`
-- [ ] Native `agent_config(...)`, `agent_status()` kiểu metadata
-- [ ] Mở rộng contact: subagent, memory, verify... (tùy cần)
-
-### A3 — Lỗi + stdlib lite  (≈ 3 buổi)
+### A2 — Lỗi + stdlib lite  (≈ 3–4 buổi)
 - [ ] **Stack trace** khi script lỗi (dòng nào, hàm nào gọi)
 - [ ] Bộ I/O đầy đủ: append_file, read_lines, list_dir, exists
 - [ ] Helper list/map: map_values, list_join, string uppercase/lowercase/substring
 - [ ] `def`/gọi với kiểm tra số đối số rõ hơn
+- [ ] Template chuỗi `${x}`
+
+### A3 — FFI / gọi thư viện ngoài (tùy chọn, để sau)
+- [ ] Cơ chế gọi hàm ngoài (Rust/Python) theo nhu cầu — không ưu tiên
 
 ### A4 — Script mẫu đời thực  (≈ 1–2 buổi)
 - [ ] `examples/sdk_workflow.kinet`: đọc danh sách task từ file → chạy agent từng task →
@@ -76,9 +73,6 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 ### C1 — Bytecode / VM  (≈ 1–2 tháng)
 - [ ] Biên dịch AST → bytecode, VM loop thay vì tree-walking
 - [ ] Đo benchmark, tối ưu hot path
-
-### C2 — Embed PyO3  (≈ 1 tuần)
-- [ ] Bỏ spawn tiến trình — gọi SDK qua embed trực tiếp (như `_kinetic_rs`)
 
 ### C3 — Tooling  (≈ 2–3 tuần)
 - [ ] Package manager lite, linter, formatter, REPL nâng cao (history, tab)
