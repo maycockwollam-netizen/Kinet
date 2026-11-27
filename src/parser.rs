@@ -302,6 +302,7 @@ impl Parser {
         let token = self.advance();
         match token.kind {
             TokenKind::Number(n) => Ok(Expr::Number(n)),
+            TokenKind::Float(f) => Ok(Expr::Float(f)),
             TokenKind::Str(s) => {
                 if s.contains("${") {
                     self.template_expr(&s)
@@ -448,6 +449,7 @@ impl Parser {
             TokenKind::Ident(name) if name == "_" => Ok(Pattern::Wildcard),
             TokenKind::Ident(name) => Ok(Pattern::Binding(name)),
             TokenKind::Number(n) => Ok(Pattern::Literal(Expr::Number(n))),
+            TokenKind::Float(f) => Ok(Pattern::Literal(Expr::Float(f))),
             TokenKind::Str(s) => Ok(Pattern::Literal(Expr::Str(s))),
             TokenKind::True => Ok(Pattern::Literal(Expr::Bool(true))),
             TokenKind::False => Ok(Pattern::Literal(Expr::Bool(false))),

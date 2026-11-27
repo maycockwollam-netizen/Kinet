@@ -8,6 +8,7 @@ pub const ESCAPED_DOLLAR: char = '\u{E000}';
 pub enum TokenKind {
     // Literals
     Number(i64),
+    Float(f64),
     Str(String),
     Ident(String),
     True,

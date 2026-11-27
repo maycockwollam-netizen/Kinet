@@ -107,14 +107,34 @@ impl Lexer {
 
     fn number(&mut self, line: usize) -> Result<Token, String> {
         let start = self.pos;
+        let mut is_float = false;
         while self.chars.get(self.pos).is_some_and(|c| c.is_ascii_digit()) {
             self.pos += 1;
         }
+        // Phần thập phân: '.' phải có chữ số đi sau (tránh "1." bị hiểu lầm).
+        if self
+            .chars
+            .get(self.pos)
+            .is_some_and(|c| *c == '.' && self.chars.get(self.pos + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
+            is_float = true;
+            self.pos += 1; // dấu '.'
+            while self.chars.get(self.pos).is_some_and(|c| c.is_ascii_digit()) {
+                self.pos += 1;
+            }
+        }
         let text: String = self.chars[start..self.pos].iter().collect();
-        let value = text
-            .parse::<i64>()
-            .map_err(|_| format!("Lỗi dòng {}: số quá lớn '{}'", line, text))?;
-        Ok(Token::new(TokenKind::Number(value), line))
+        if is_float {
+            let value = text
+                .parse::<f64>()
+                .map_err(|_| format!("Lỗi dòng {}: số thập phân không hợp lệ '{}'", line, text))?;
+            Ok(Token::new(TokenKind::Float(value), line))
+        } else {
+            let value = text
+                .parse::<i64>()
+                .map_err(|_| format!("Lỗi dòng {}: số quá lớn '{}'", line, text))?;
+            Ok(Token::new(TokenKind::Number(value), line))
+        }
     }
 
     fn string(&mut self, line: usize) -> Result<Token, String> {

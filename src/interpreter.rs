@@ -17,6 +17,7 @@ use crate::token::TokenKind;
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     List(Vec<Value>),
@@ -39,6 +40,9 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Int(a), Value::Float(b)) => *a as f64 == *b,
+            (Value::Float(a), Value::Int(b)) => *a == *b as f64,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
@@ -64,6 +68,12 @@ impl Hash for Value {
             Value::Int(n) => {
                 0u8.hash(state);
                 n.hash(state);
+            }
+            Value::Float(n) => {
+                // Chuẩn hóa -0.0 → 0.0 để nhất quán với ==
+                let v = if *n == 0.0 { 0.0f64 } else { *n };
+                8u8.hash(state);
+                v.to_bits().hash(state);
             }
             Value::Str(s) => {
                 1u8.hash(state);
@@ -490,6 +500,7 @@ impl Interpreter {
     fn eval(&mut self, expr: &Expr, env: EnvRef) -> Result<Value, String> {
         match expr {
             Expr::Number(n) => Ok(Value::Int(*n)),
+            Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
@@ -522,6 +533,7 @@ impl Interpreter {
                             .checked_neg()
                             .map(Value::Int)
                             .ok_or_else(|| "Tràn số khi lấy '-'".to_string()),
+                        Value::Float(f) => Ok(Value::Float(-f)),
                         _ => Err("Toán tử '-' cần số".to_string()),
                     },
                     TokenKind::Not => Ok(Value::Bool(!self.truthy(&v))),
@@ -616,89 +628,120 @@ impl Interpreter {
         let rv = self.eval(right, env)?;
 
         match op {
-            TokenKind::Plus => match (&lv, &rv) {
-                (Value::Int(a), Value::Int(b)) => (*a)
-                    .checked_add(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| "Tràn số khi cộng".to_string()),
-                (Value::Str(a), Value::Str(b)) => {
-                    // Kiểm tra trước khi cấp phát — chống `s = s + s` phình RAM.
-                    check_len("chuỗi nối", a.chars().count() + b.chars().count(), MAX_STR_CHARS)?;
-                    Ok(Value::Str(format!("{}{}", a, b)))
-                }
-                (Value::Str(a), Value::Int(b)) => {
-                    let len = a.chars().count() + b.to_string().len();
+            // `+`: nếu có chuỗi thì nối; ngược lại số học (int/float).
+            TokenKind::Plus => {
+                if matches!(lv, Value::Str(_)) || matches!(rv, Value::Str(_)) {
+                    let left = self.to_string(&lv);
+                    let right = self.to_string(&rv);
+                    let len = left.chars().count() + right.chars().count();
                     check_len("chuỗi nối", len, MAX_STR_CHARS)?;
-                    Ok(Value::Str(format!("{}{}", a, b)))
+                    Ok(Value::Str(format!("{}{}", left, right)))
+                } else {
+                    self.num_arith(&lv, &rv, op)
                 }
-                (Value::Int(a), Value::Str(b)) => {
-                    let len = a.to_string().len() + b.chars().count();
-                    check_len("chuỗi nối", len, MAX_STR_CHARS)?;
-                    Ok(Value::Str(format!("{}{}", a, b)))
-                }
-                _ => Err("'+' cần hai số hoặc chuỗi".to_string()),
-            },
-            TokenKind::Minus => self.int_arith(&lv, &rv, op),
-            TokenKind::Star => self.int_arith(&lv, &rv, op),
-            TokenKind::Slash => {
-                let (a, b) = self.as_ints(&lv, &rv, op)?;
-                if b == 0 {
-                    return Err("Chia cho 0".to_string());
-                }
-                a.checked_div(b)
-                    .map(Value::Int)
-                    .ok_or_else(|| "Tràn số khi chia".to_string())
             }
-            TokenKind::Percent => {
-                let (a, b) = self.as_ints(&lv, &rv, op)?;
-                if b == 0 {
-                    return Err("Chia lấy dư cho 0".to_string());
-                }
-                a.checked_rem(b)
-                    .map(Value::Int)
-                    .ok_or_else(|| "Tràn số khi lấy dư".to_string())
-            }
+            TokenKind::Minus => self.num_arith(&lv, &rv, op),
+            TokenKind::Star => self.num_arith(&lv, &rv, op),
+            TokenKind::Slash => self.num_arith(&lv, &rv, op),
+            TokenKind::Percent => self.num_arith(&lv, &rv, op),
             TokenKind::Eq => Ok(Value::Bool(lv == rv)),
             TokenKind::NotEq => Ok(Value::Bool(lv != rv)),
-            TokenKind::Lt => self.int_cmp(&lv, &rv, op),
-            TokenKind::Gt => self.int_cmp(&lv, &rv, op),
-            TokenKind::Le => self.int_cmp(&lv, &rv, op),
-            TokenKind::Ge => self.int_cmp(&lv, &rv, op),
+            TokenKind::Lt => self.cmp_values(&lv, &rv, op),
+            TokenKind::Gt => self.cmp_values(&lv, &rv, op),
+            TokenKind::Le => self.cmp_values(&lv, &rv, op),
+            TokenKind::Ge => self.cmp_values(&lv, &rv, op),
             _ => unreachable!(),
         }
     }
 
-    fn int_arith(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
-        let (a, b) = self.as_ints(l, r, op)?;
-        let result = match op {
-            TokenKind::Minus => a
-                .checked_sub(b)
-                .ok_or_else(|| "Tràn số khi trừ".to_string()),
-            TokenKind::Star => a
-                .checked_mul(b)
-                .ok_or_else(|| "Tràn số khi nhân".to_string()),
-            _ => unreachable!(),
-        }?;
-        Ok(Value::Int(result))
+    // Số học: int+int → int (checked), có float → float.
+    fn num_arith(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => {
+                let result = match op {
+                    TokenKind::Plus => a
+                        .checked_add(*b)
+                        .ok_or_else(|| "Tràn số khi cộng".to_string())?,
+                    TokenKind::Minus => a
+                        .checked_sub(*b)
+                        .ok_or_else(|| "Tràn số khi trừ".to_string())?,
+                    TokenKind::Star => a
+                        .checked_mul(*b)
+                        .ok_or_else(|| "Tràn số khi nhân".to_string())?,
+                    TokenKind::Slash => {
+                        if *b == 0 {
+                            return Err("Chia cho 0".to_string());
+                        }
+                        a.checked_div(*b)
+                            .ok_or_else(|| "Tràn số khi chia".to_string())?
+                    }
+                    TokenKind::Percent => {
+                        if *b == 0 {
+                            return Err("Chia lấy dư cho 0".to_string());
+                        }
+                        a.checked_rem(*b)
+                            .ok_or_else(|| "Tràn số khi lấy dư".to_string())?
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Value::Int(result))
+            }
+            _ => {
+                let a = self.as_f64(l, op)?;
+                let b = self.as_f64(r, op)?;
+                let result = match op {
+                    TokenKind::Plus => a + b,
+                    TokenKind::Minus => a - b,
+                    TokenKind::Star => a * b,
+                    TokenKind::Slash => {
+                        if b == 0.0 {
+                            return Err("Chia cho 0".to_string());
+                        }
+                        a / b
+                    }
+                    TokenKind::Percent => {
+                        if b == 0.0 {
+                            return Err("Chia lấy dư cho 0".to_string());
+                        }
+                        a % b
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Value::Float(result))
+            }
+        }
     }
 
-    fn int_cmp(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
-        let (a, b) = self.as_ints(l, r, op)?;
-        let result = match op {
-            TokenKind::Lt => a < b,
-            TokenKind::Gt => a > b,
-            TokenKind::Le => a <= b,
-            TokenKind::Ge => a >= b,
-            _ => unreachable!(),
+    fn as_f64(&self, v: &Value, op: &TokenKind) -> Result<f64, String> {
+        match v {
+            Value::Int(n) => Ok(*n as f64),
+            Value::Float(f) => Ok(*f),
+            _ => Err(format!("Toán tử '{}' cần số", self.op_symbol(op))),
+        }
+    }
+
+    // So sánh số (int/float); chuỗi/khác kiểu không so bằng < > được.
+    fn cmp_values(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<Value, String> {
+        let result = if let (Value::Int(a), Value::Int(b)) = (l, r) {
+            match op {
+                TokenKind::Lt => a < b,
+                TokenKind::Gt => a > b,
+                TokenKind::Le => a <= b,
+                TokenKind::Ge => a >= b,
+                _ => unreachable!(),
+            }
+        } else {
+            let a = self.as_f64(l, op)?;
+            let b = self.as_f64(r, op)?;
+            match op {
+                TokenKind::Lt => a < b,
+                TokenKind::Gt => a > b,
+                TokenKind::Le => a <= b,
+                TokenKind::Ge => a >= b,
+                _ => unreachable!(),
+            }
         };
         Ok(Value::Bool(result))
-    }
-
-    fn as_ints(&self, l: &Value, r: &Value, op: &TokenKind) -> Result<(i64, i64), String> {
-        let (&Value::Int(a), &Value::Int(b)) = (l, r) else {
-            return Err(format!("Toán tử '{}' cần hai số", self.op_symbol(op)));
-        };
-        Ok((a, b))
     }
 
     fn op_symbol(&self, op: &TokenKind) -> &str {
@@ -813,6 +856,7 @@ impl Interpreter {
             Value::Bool(b) => *b,
             Value::Nil => false,
             Value::Int(n) => *n != 0,
+            Value::Float(f) => *f != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::List(items) => !items.is_empty(),
             Value::Map(entries) => !entries.is_empty(),
@@ -823,6 +867,7 @@ impl Interpreter {
     fn to_string(&self, v: &Value) -> String {
         match v {
             Value::Int(n) => n.to_string(),
+            Value::Float(f) => format_float(*f),
             Value::Str(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
             Value::List(items) => {
@@ -1335,9 +1380,19 @@ fn canonicalize_loose(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Chuyển một Value thành chuỗi hiển thị (dùng trong list_join và những chỗ
 /// không có sẵn Interpreter::to_string).
+/// Định dạng float: số nguyên hiện "3.0", còn lại hiện ngắn gọn (3.14).
+fn format_float(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{:.1}", f)
+    } else {
+        format!("{}", f)
+    }
+}
+
 fn stringify_value(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
+        Value::Float(f) => format_float(*f),
         Value::Str(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
         Value::List(items) => {
@@ -2007,6 +2062,43 @@ mod tests {
     fn caught_error_message_has_content() {
         let src = r#"let msg = ""; try { let x = 1 / 0; } catch e { msg = e; } let has = contains(msg, "Chia cho 0");"#;
         assert_eq!(run_and_get(src, "has"), Value::Bool(true));
+    }
+
+    // ----- float -----
+
+    #[test]
+    fn float_literal_and_arith() {
+        assert_eq!(run_and_get("let x = 1.5 + 2.5;", "x"), Value::Float(4.0));
+        assert_eq!(run_and_get("let x = 2.5 * 2;", "x"), Value::Float(5.0));
+        assert_eq!(run_and_get("let x = 10.0 / 4;", "x"), Value::Float(2.5));
+        assert_eq!(run_and_get("let x = 7.5 % 2;", "x"), Value::Float(1.5));
+    }
+
+    #[test]
+    fn int_division_stays_int() {
+        assert_eq!(run_and_get("let x = 5 / 2;", "x"), Value::Int(2));
+        assert_eq!(run_and_get("let x = 5.0 / 2;", "x"), Value::Float(2.5));
+    }
+
+    #[test]
+    fn float_comparison_and_equality() {
+        assert_eq!(run_and_get("let x = 1.5 < 2;", "x"), Value::Bool(true));
+        assert_eq!(run_and_get("let x = 1 == 1.0;", "x"), Value::Bool(true));
+        assert_eq!(run_and_get("let x = 1.0 != 2;", "x"), Value::Bool(true));
+    }
+
+    #[test]
+    fn float_unary_minus_and_string() {
+        assert_eq!(run_and_get("let x = -1.5;", "x"), Value::Float(-1.5));
+        assert_eq!(
+            run_and_get(r#"let s = "x = " + 3.0;"#, "s"),
+            Value::Str("x = 3.0".into())
+        );
+    }
+
+    #[test]
+    fn float_zero_is_falsy() {
+        assert_eq!(run_and_get("let x = 0.0; let r = not x;", "r"), Value::Bool(true));
     }
 
     #[test]

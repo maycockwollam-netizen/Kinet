@@ -52,12 +52,19 @@ func add(a, b) {              // hàm + đệ quy
     return a + b;
 }
 println(add(2, 5));
+
+try {                          // bắt lỗi runtime
+    let r = risky();
+} catch e {
+    println("Thất bại: ", e);  // e = thông báo lỗi (kèm số dòng)
+}
 ```
 
 ### Kiểu dữ liệu hiện có
 | Kiểu | Ví dụ |
 |---|---|
 | Số nguyên `i64` | `42`, `-7` |
+| Số thập phân `f64` | `3.14`, `-2.5` — trộn được với số nguyên |
 | Chuỗi | `"xin chào"` (hỗ trợ `\n`, `\t`, `\"`, `\\`) |
 | Bool | `true`, `false` |
 | List | `[1, "hai", true]` — có thể trộn kiểu |
@@ -182,6 +189,7 @@ Demo đầy đủ: `cargo run -- examples/import_demo.kinet`
 - [x] **Template chuỗi `${x}` + Lambda + Import** (Giai đoạn A xong; mở Phase B)
 - [x] **Audit v3:** sandbox mặc định bật (chống `..`, path tuyệt đối, symlink), trần bộ nhớ (chuỗi/list/map), `\$` escape, range checked_sub, import chống vòng + không nhớ lỗi
 - [x] **Dọn nợ:** stack trace CÓ SỐ DÒNG (`Lỗi dòng N` + `tại hàm x (dòng M)`), map chuyển `IndexMap` (tra cứu O(1))
+- [x] **`try/catch`** (bắt lỗi runtime, bind thông báo kèm dòng) + **`float f64`** (số thập phân, trộn được với int)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 
 ### Ghi chú thiết kế (đã cân nhắc, không phải bug cấp bách)

@@ -21,6 +21,7 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     Nil,

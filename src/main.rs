@@ -268,6 +268,7 @@ fn p_exprs(exprs: &[Expr], indent: usize, out: &mut String) {
 fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
     match expr {
         Expr::Number(n) => out.push_str(&n.to_string()),
+        Expr::Float(f) => out.push_str(&format!("{}", f)),
         Expr::Str(s) => out.push_str(&format!("\"{}\"", s)),
         Expr::Bool(b) => out.push_str(&b.to_string()),
         Expr::Nil => out.push_str("nil"),
