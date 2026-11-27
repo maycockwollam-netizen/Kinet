@@ -1,6 +1,8 @@
 # Kinet — My Programming Language
 
-Một ngôn ngữ lập trình nhỏ viết bằng **Rust**, tự xây dựng theo kiến trúc kinh điển:
+Một **ngôn ngữ lập trình đa dụng** viết bằng **Rust**, tự xây dựng theo kiến trúc kinh điển.
+Dùng để viết đủ loại chương trình — agent, công cụ, thư viện, thậm chí một trình thông
+dịch/ngôn ngữ khác. Nói chung mày muốn tạo gì cũng được, miễn là viết được bằng code.
 
 ```
 Code text → Lexer → Token → Parser → AST → Interpreter → Kết quả
