@@ -10,7 +10,7 @@
 //!   unary (- not)
 //!   primary / call
 
-use crate::ast::{CompClause, Expr, MatchArm, Pattern, Stmt};
+use crate::ast::{CompClause, Expr, MatchArm, MethodDef, Pattern, Stmt};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
 
@@ -48,6 +48,7 @@ impl Parser {
         match kind {
             TokenKind::Let => self.let_stmt(),
             TokenKind::Func => self.func_stmt(),
+            TokenKind::Struct => self.struct_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
@@ -114,6 +115,74 @@ impl Parser {
         self.consume(TokenKind::RParen, "mong đợi ')' sau danh sách tham số")?;
         let body = self.block()?;
         Ok(Stmt::Func { name, params, body })
+    }
+
+    // struct Tên { field = mặc_định; func method(params) { ... } }
+    fn struct_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // struct
+        let name = self.expect_ident("tên struct")?;
+        self.consume(TokenKind::LBrace, "mong đợi '{' sau tên struct")?;
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        let mut methods: Vec<MethodDef> = Vec::new();
+        while !self.check(&TokenKind::RBrace) {
+            if self.check(&TokenKind::Func) {
+                self.advance(); // func
+                let mname = self.expect_ident("tên phương thức")?;
+                if methods.iter().any(|m| m.name == mname)
+                    || fields.iter().any(|(f, _)| f == &mname)
+                {
+                    return Err(self.error(format!("tên '{}' trùng trong struct", mname)));
+                }
+                self.consume(
+                    TokenKind::LParen,
+                    "mong đợi '(' sau tên phương thức",
+                )?;
+                let mut params = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        let param = self.expect_ident("tên tham số")?;
+                        if params.contains(&param) {
+                            return Err(self.error(format!("tham số trùng tên '{}'", param)));
+                        }
+                        params.push(param);
+                        if !self.match_or(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.consume(
+                    TokenKind::RParen,
+                    "mong đợi ')' sau danh sách tham số",
+                )?;
+                let body = self.block()?;
+                methods.push(MethodDef {
+                    name: mname,
+                    params,
+                    body,
+                });
+            } else {
+                // Field: tên [= giá trị mặc định];
+                let fname = self.expect_ident("tên field trong struct")?;
+                if fields.iter().any(|(f, _)| f == &fname)
+                    || methods.iter().any(|m| m.name == fname)
+                {
+                    return Err(self.error(format!("tên '{}' trùng trong struct", fname)));
+                }
+                let default = if self.match_or(TokenKind::Assign) {
+                    self.expression()?
+                } else {
+                    Expr::Nil
+                };
+                self.expect_semi("field")?;
+                fields.push((fname, default));
+            }
+        }
+        self.consume(TokenKind::RBrace, "mong đợi '}' để đóng struct")?;
+        Ok(Stmt::Struct {
+            name,
+            fields,
+            methods,
+        })
     }
 
     fn import_stmt(&mut self) -> Result<Stmt, String> {
@@ -258,8 +327,18 @@ impl Parser {
                     value: Box::new(value),
                 });
             }
+            // p.x = v / a.b.c = v (field struct)
+            if let Some((name, path)) = flatten_member(&left) {
+                if !path.is_empty() {
+                    return Ok(Expr::MemberAssign {
+                        name: name.to_string(),
+                        path,
+                        value: Box::new(value),
+                    });
+                }
+            }
             return Err(self.error(
-                "vế trái của '=' phải là biến hoặc mục lấy theo chỉ số (a[i] / m[\"k\"])".to_string(),
+                "vế trái của '=' phải là biến, mục lấy theo chỉ số (a[i]) hoặc field (p.x)".to_string(),
             ));
         }
         Ok(left)
@@ -371,31 +450,34 @@ impl Parser {
                     args,
                 };
             } else if self.match_or(TokenKind::Dot) {
-                // Phương thức: expr.name(args) — target có thể là bất kỳ biểu thức
-                // nào, chuỗi được với nhau (x.f().g()).
-                let name = self.expect_ident("tên phương thức sau '.'")?;
-                self.consume(
-                    TokenKind::LParen,
-                    &format!("mong đợi '(' sau phương thức '{}'", name),
-                )?;
-                let mut margs = Vec::new();
-                if !self.check(&TokenKind::RParen) {
-                    loop {
-                        margs.push(self.expression()?);
-                        if !self.match_or(TokenKind::Comma) {
-                            break;
+                // Field hoặc phương thức: expr.name / expr.name(args)
+                // — target là biểu thức bất kỳ, chuỗi được (x.f().g()).
+                let name = self.expect_ident("tên field/phương thức sau '.'")?;
+                if self.match_or(TokenKind::LParen) {
+                    let mut margs = Vec::new();
+                    if !self.check(&TokenKind::RParen) {
+                        loop {
+                            margs.push(self.expression()?);
+                            if !self.match_or(TokenKind::Comma) {
+                                break;
+                            }
                         }
                     }
+                    self.consume(
+                        TokenKind::RParen,
+                        "mong đợi ')' sau đối số phương thức",
+                    )?;
+                    callee = Expr::MethodCall {
+                        target: Box::new(callee),
+                        name,
+                        args: margs,
+                    };
+                } else {
+                    callee = Expr::Member {
+                        target: Box::new(callee),
+                        name,
+                    };
                 }
-                self.consume(
-                    TokenKind::RParen,
-                    "mong đợi ')' sau đối số phương thức",
-                )?;
-                callee = Expr::MethodCall {
-                    target: Box::new(callee),
-                    name,
-                    args: margs,
-                };
             } else if self.match_or(TokenKind::LBracket) {
                 // arr[i] / m["k"] / grid[r][c] — hoặc slice arr[i:j] / arr[:j] / arr[::k].
                 if self.check(&TokenKind::Colon) {
@@ -904,6 +986,19 @@ fn flatten_index(expr: &Expr) -> Option<(&str, Vec<Expr>)> {
             let (name, mut indices) = flatten_index(target)?;
             indices.push((**index).clone());
             Some((name, indices))
+        }
+        _ => None,
+    }
+}
+
+/// Tách vế trái `name.x.y...` thành biến gốc + chuỗi field (cho `p.x = v`).
+fn flatten_member(expr: &Expr) -> Option<(&str, Vec<String>)> {
+    match expr {
+        Expr::Variable(name) => Some((name, Vec::new())),
+        Expr::Member { target, name } => {
+            let (root, mut path) = flatten_member(target)?;
+            path.push(name.clone());
+            Some((root, path))
         }
         _ => None,
     }

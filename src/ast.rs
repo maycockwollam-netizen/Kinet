@@ -104,6 +104,25 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    // Lấy field của struct: `p.x`
+    Member {
+        target: Box<Expr>,
+        name: String,
+    },
+    // Gán field: `p.x = v` (hoặc lồng `a.b.c = v`) — root biến + chuỗi field.
+    MemberAssign {
+        name: String,
+        path: Vec<String>,
+        value: Box<Expr>,
+    },
+}
+
+/// Một phương thức khai báo trong struct (có `self` khi chạy).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +167,11 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+    },
+    Struct {
+        name: String,
+        fields: Vec<(String, Expr)>,
+        methods: Vec<MethodDef>,
     },
     Return(Expr),
 }

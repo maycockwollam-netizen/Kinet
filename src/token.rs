@@ -17,6 +17,7 @@ pub enum TokenKind {
     // Keywords
     Let,
     Func,
+    Struct,
     If,
     Else,
     While,

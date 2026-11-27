@@ -244,6 +244,25 @@ fn p_stmt(stmt: &Stmt, indent: usize, out: &mut String) {
             out.push_str(&format!("func {}({})\n", name, params.join(", ")));
             p_stmts(body, indent + 1, out);
         }
+        Stmt::Struct {
+            name,
+            fields,
+            methods,
+        } => {
+            p_indent(out, indent);
+            out.push_str(&format!("struct {}\n", name));
+            for (fname, default) in fields {
+                p_indent(out, indent + 1);
+                out.push_str(&format!("{} = ", fname));
+                p_expr(default, 0, out);
+                out.push_str(";\n");
+            }
+            for m in methods {
+                p_indent(out, indent + 1);
+                out.push_str(&format!("func {}({})\n", m.name, m.params.join(", ")));
+                p_stmts(&m.body, indent + 2, out);
+            }
+        }
         Stmt::Return(e) => {
             p_indent(out, indent);
             out.push_str("return ");
@@ -452,6 +471,24 @@ fn p_expr(expr: &Expr, indent: usize, out: &mut String) {
             out.push('(');
             p_exprs(args, indent + 1, out);
             out.push(')');
+        }
+        Expr::Member { target, name } => {
+            p_expr(target, indent, out);
+            out.push('.');
+            out.push_str(name);
+        }
+        Expr::MemberAssign {
+            name,
+            path,
+            value,
+        } => {
+            out.push_str(name);
+            for f in path {
+                out.push('.');
+                out.push_str(f);
+            }
+            out.push_str(" = ");
+            p_expr(value, indent + 1, out);
         }
     }
 }

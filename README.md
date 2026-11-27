@@ -189,6 +189,40 @@ m.get("k");  m.set("k", v);  m.keys();  m.contains("k");  m.remove("k");  m.len(
 (-7).abs();   2.6.round();   2.6.floor();   2.4.ceil();   3.to_float();
 ```
 
+### Struct + Method + Magic methods (OOP kiểu value)
+`struct` khai báo **kiểu dữ liệu có khóa cố định** kèm phương thức; tạo instance bằng
+`Tên(đối số...)` (gán cho field theo thứ tự, thiếu thì dùng mặc định). Struct là
+**kiểu value** — gán/dùng được trong list/map, không có alias.
+
+```kotlin
+struct Vec2 {
+    x = 0;                       // field + giá trị mặc định
+    y = 0;
+    func mag() { return x * x + y * y; }        // dùng field trực tiếp (hoặc self.x)
+    func scaled(k) { return Vec2(x * k, y * k); }
+    func __add__(o) { return Vec2(x + o.x, y + o.y); }   // magic: p + q
+    func __mul__(k) { return Vec2(x * k, y * k); }        // magic: p * 2
+    func __len__() { return 2; }                          // magic: len(p)
+    func __str__() { return "V(" + str(x) + ", " + str(y) + ")"; }  // magic: str(p)
+    func __eq__(o) { return x == o.x and y == o.y; }      // magic: p == q
+    func __getitem__(i) { if i == 0 { return x; } return y; }      // magic: p[0]
+    func __setitem__(i, v) { if i == 0 { self.x = v; } else { self.y = v; } return self; }  // p[i] = v
+    func __contains__(n) { return n == x or n == y; }     // magic: n in p
+}
+
+let v = Vec2(3, 4);
+println(v.mag());        // 25
+v.x = 10;                // gán field
+println(v + Vec2(1, 1)); // V(11, 5)      (dùng __add__)
+println(len(v));         // 2             (dùng __len__)
+println(str(v));         // V(10, 4)      (dùng __str__)
+```
+
+Magic methods có sẵn: `__add__` `__sub__` `__mul__` `__div__` `__mod__` (toán tử,
+thử vế trái trước rồi vế phải), `__eq__` (`==`/`!=`), `__len__` (`len(x)`),
+`__str__` (`str(x)`), `__getitem__` / `__setitem__` (`x[i]`), `__contains__` (`in`).
+`__setitem__` phải **trả về struct mới** (value semantics, giống `map_set`).
+
 ## Viết phần mềm khác bằng Kinet (Mốc 4)
 
 Kinet đã đủ tính năng cho **lập trình đa dụng**: `map` (dictionary), file I/O, đệ quy sâu (độ sâu 2000), hàm chuỗi, list. Bằng chứng là `examples/mini_interp.kinet` — **một trình thông dịch tính biểu thức số học viết hoàn toàn bằng Kinet**:

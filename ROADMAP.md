@@ -55,7 +55,8 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 ### B2 — Kiểu + ngữ nghĩa  (≈ 4–5 buổi)
 - [x] `float` (đã trộn với int), slice `a[i:j:k]`, chỉ số âm `a[-1]`, `in`, comprehension (2026-11-27)
 - [x] Phương thức trên kiểu `x.method(args)` (string/list/map/số) — đều THUẦN, desugar sang native (2026-11-27)
-- [ ] Tuple / struct nhẹ (map có khoá cố định + validate)
+- [x] **Struct + method + magic methods** (`__add__`/`__len__`/`__str__`/`__eq__`/`__getitem__`...): OOP kiểu value, field `p.x`, gán `p.x = v` (2026-11-27)
+- [ ] Tuple / struct nhẹ còn lại: validate khóa / enum
 
 ### B3 — Xử lý lỗi  (≈ 3 buổi)
 - [x] `try` / `throw` / `catch` (kiểu ngoại lệ)

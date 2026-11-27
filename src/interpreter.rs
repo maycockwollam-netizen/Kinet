@@ -25,7 +25,27 @@ pub enum Value {
     Map(IndexMap<Value, Value>),
     Func(FuncDef),
     Native(NativeFunc),
+    // Định nghĩa struct (dùng để tạo instance khi gọi Name(args)).
+    StructType(StructTypeDef),
+    // Một instance struct: fields + methods nhúng sẵn.
+    Struct(StructVal),
     Nil,
+}
+
+/// Định nghĩa struct: tên + field mặc định + phương thức (closure lúc định nghĩa).
+#[derive(Debug, Clone)]
+pub struct StructTypeDef {
+    pub name: String,
+    pub fields: Vec<(String, Value)>,
+    pub methods: IndexMap<String, FuncDef>,
+}
+
+/// Một instance struct: fields riêng + tham chiếu tới định nghĩa struct.
+/// Dùng Rc để instance gọn và rẻ (không sao chép methods mỗi lần tạo).
+#[derive(Debug, Clone)]
+pub struct StructVal {
+    pub ty: std::rc::Rc<StructTypeDef>,
+    pub fields: IndexMap<String, Value>,
 }
 
 // Hàm builtin do Rust cài, nhận sẵn danh sách giá trị đối số.
@@ -52,6 +72,9 @@ impl PartialEq for Value {
             }
             (Value::Func(a), Value::Func(b)) => a.name == b.name,
             (Value::Native(a), Value::Native(b)) => a.name == b.name,
+            // Struct type: so theo tên; instance: theo tên + nội dung field.
+            (Value::StructType(a), Value::StructType(b)) => a.name == b.name,
+            (Value::Struct(a), Value::Struct(b)) => a.ty.name == b.ty.name && a.fields == b.fields,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -91,6 +114,19 @@ impl Hash for Value {
             Value::Native(n) => {
                 5u8.hash(state);
                 n.name.hash(state);
+            }
+            Value::StructType(t) => {
+                9u8.hash(state);
+                t.name.hash(state);
+            }
+            Value::Struct(s) => {
+                10u8.hash(state);
+                s.ty.name.hash(state);
+                // Băm từng (tên field, giá trị) theo thứ tự — khớp với eq.
+                for (k, v) in &s.fields {
+                    k.hash(state);
+                    v.hash(state);
+                }
             }
             Value::List(items) => {
                 6u8.hash(state);
@@ -531,6 +567,38 @@ impl Interpreter {
                 env.borrow_mut().define(name, func);
                 Ok(Flow::Normal)
             }
+            Stmt::Struct {
+                name,
+                fields,
+                methods,
+            } => {
+                // Đánh giá giá trị mặc định của field ngay khi định nghĩa struct,
+                // và biến mỗi method thành FuncDef đóng quanh env hiện tại.
+                let mut field_defaults: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+                for (fname, def) in fields {
+                    let v = self.eval(def, env.clone())?;
+                    field_defaults.push((fname.clone(), v));
+                }
+                let mut method_defs: IndexMap<String, FuncDef> = IndexMap::new();
+                for m in methods {
+                    method_defs.insert(
+                        m.name.clone(),
+                        FuncDef {
+                            name: format!("{}.{}", name, m.name),
+                            params: m.params.clone(),
+                            body: m.body.clone(),
+                            closure: env.clone(),
+                        },
+                    );
+                }
+                let st = StructTypeDef {
+                    name: name.clone(),
+                    fields: field_defaults,
+                    methods: method_defs,
+                };
+                env.borrow_mut().define(name, Value::StructType(st));
+                Ok(Flow::Normal)
+            }
             Stmt::Return(e) => {
                 let v = self.eval(e, env)?;
                 Ok(Flow::Return(v))
@@ -686,6 +754,34 @@ impl Interpreter {
                     arg_values.push(self.eval(a, env.clone())?);
                 }
                 self.call_method(receiver, name, arg_values)
+            }
+            Expr::Member { target, name } => {
+                let v = self.eval(target, env)?;
+                get_struct_field(&v, name)
+            }
+            Expr::MemberAssign {
+                name,
+                path,
+                value,
+            } => {
+                // name.x.y.z = value — đi sâu, đặt field, dựng lại rồi gán biến gốc.
+                let root = env.borrow().get(name)?;
+                let mut current = root;
+                let mut stack: Vec<Value> = Vec::new();
+                for f in &path[..path.len() - 1] {
+                    let next = get_struct_field(&current, f)?;
+                    stack.push(current);
+                    current = next;
+                }
+                let new_val = self.eval(value, env.clone())?;
+                let mut rebuilt =
+                    set_struct_field(&current, path.last().unwrap(), new_val)?;
+                for f in path[..path.len() - 1].iter().rev() {
+                    let container = stack.pop().unwrap();
+                    rebuilt = set_struct_field(&container, f, rebuilt)?;
+                }
+                env.borrow_mut().assign(name, rebuilt.clone())?;
+                Ok(rebuilt)
             }
         }
     }
@@ -854,7 +950,12 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
 
     // `x in y`: list chứa phần tử, chuỗi chứa chuỗi con, map chứa khóa.
     // Để ngoài eval_binary cho frame gọn (path nóng của đệ quy).
-    fn eval_in(&self, lv: &Value, rv: &Value) -> Result<Value, String> {
+    fn eval_in(&mut self, lv: &Value, rv: &Value) -> Result<Value, String> {
+        // struct có thể định nghĩa __contains__(x).
+        if let Some(res) = self.call_magic(rv, "__contains__", vec![lv.clone()]) {
+            let found = res?;
+            return Ok(Value::Bool(self.truthy(&found)));
+        }
         if let Value::Str(s) = rv {
             let Value::Str(needle) = lv else {
                 return Err("vế trái của 'in' phải là chuỗi khi vế phải là chuỗi".to_string());
@@ -904,6 +1005,11 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
 
         let lv = self.eval(left, env.clone())?;
         let rv = self.eval(right, env)?;
+
+        // Magic methods của struct được ưu tiên trước hành vi mặc định.
+        if let Some(r) = self.try_binop_magic(op, &lv, &rv)? {
+            return Ok(r);
+        }
 
         match op {
             // `+`: nếu có chuỗi thì nối; ngược lại số học (int/float).
@@ -1051,8 +1157,18 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         }
     }
 
-    // Đọc phần tử: list/chuỗi theo chỉ số int (âm = đếm từ cuối), map theo khóa.
-    fn index_get(&self, container: &Value, idx: &Value) -> Result<Value, String> {
+    // Đọc phần tử: list/chuỗi theo chỉ số int (âm = đếm từ cuối), map theo khóa,
+    // struct theo __getitem__ (nếu định nghĩa).
+    fn index_get(&mut self, container: &Value, idx: &Value) -> Result<Value, String> {
+        if let Value::Struct(s) = container {
+            if s.ty.methods.contains_key("__getitem__") {
+                return self.call_method(container.clone(), "__getitem__", vec![idx.clone()]);
+            }
+            return Err(format!(
+                "struct '{}' không hỗ trợ `[]` (thiếu __getitem__)",
+                s.ty.name
+            ));
+        }
         match container {
             Value::List(items) => {
                 let i = expect_and_normalize_index(idx, items.len())?;
@@ -1071,7 +1187,16 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
     }
 
     // Ghi phần tử (bản sao cập nhật); dùng cho `arr[i] = v`. Chỉ số âm được phép.
-    fn index_set(&self, container: &Value, idx: &Value, val: Value) -> Result<Value, String> {
+    fn index_set(&mut self, container: &Value, idx: &Value, val: Value) -> Result<Value, String> {
+        if let Value::Struct(s) = container {
+            if s.ty.methods.contains_key("__setitem__") {
+                return self.call_method(container.clone(), "__setitem__", vec![idx.clone(), val]);
+            }
+            return Err(format!(
+                "struct '{}' không hỗ trợ gán `[]` (thiếu __setitem__)",
+                s.ty.name
+            ));
+        }
         match container {
             Value::List(items) => {
                 let i = expect_and_normalize_index(idx, items.len())?;
@@ -1185,6 +1310,12 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 "to_float" => "to_float",
                 _ => return Err(self.method_err(&receiver, name)),
             },
+            Value::Struct(s) => {
+                if let Some(def) = s.ty.methods.get(name) {
+                    return self.call_struct_method(receiver.clone(), def.clone(), args);
+                }
+                return Err(self.method_err(&receiver, name));
+            }
             _ => return Err(self.method_err(&receiver, name)),
         };
         let mut all = Vec::with_capacity(args.len() + 1);
@@ -1192,6 +1323,94 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
         all.extend(args);
         let func = self.globals.borrow().get(builtin)?;
         self.call(func, all)
+    }
+
+    // Gọi một method của struct: đưa các field vào env (dùng tên trực tiếp:
+    // `x` thay vì `self.x`), đồng thời gán `self` = instance.
+    fn call_struct_method(
+        &mut self,
+        receiver: Value,
+        def: FuncDef,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        let env = std::rc::Rc::new(std::cell::RefCell::new(Env::child(def.closure.clone())));
+        if let Value::Struct(s) = &receiver {
+            for (k, v) in &s.fields {
+                env.borrow_mut().define(k, v.clone());
+            }
+        }
+        env.borrow_mut().define("self", receiver.clone());
+        let bound = FuncDef {
+            name: def.name.clone(),
+            params: def.params.clone(),
+            body: def.body.clone(),
+            closure: env,
+        };
+        self.call(Value::Func(bound), args)
+    }
+
+    // Gọi magic method nếu struct có (ví dụ __add__). None = không có.
+    fn call_magic(&mut self, v: &Value, name: &str, args: Vec<Value>) -> Option<Result<Value, String>> {
+        if let Value::Struct(s) = v {
+            if s.ty.methods.contains_key(name) {
+                return Some(self.call_method(v.clone(), name, args));
+            }
+        }
+        None
+    }
+
+    // Thử magic binop: toán hạng trái trước, rồi mới tới phải (như __add__/__radd__).
+    fn try_magic_binop(
+        &mut self,
+        lv: &Value,
+        rv: &Value,
+        name: &str,
+    ) -> Result<Option<Value>, String> {
+        if let Some(res) = self.call_magic(lv, name, vec![rv.clone()]) {
+            return Ok(Some(res?));
+        }
+        if let Some(res) = self.call_magic(rv, name, vec![lv.clone()]) {
+            return Ok(Some(res?));
+        }
+        Ok(None)
+    }
+
+    // Magic cho toán tử nhị phân — tách ngoài eval_binary để frame hot gọn.
+    fn try_binop_magic(
+        &mut self,
+        op: &TokenKind,
+        lv: &Value,
+        rv: &Value,
+    ) -> Result<Option<Value>, String> {
+        let (magic, negate) = match op {
+            TokenKind::Plus => ("__add__", false),
+            TokenKind::Minus => ("__sub__", false),
+            TokenKind::Star => ("__mul__", false),
+            TokenKind::Slash => ("__div__", false),
+            TokenKind::Percent => ("__mod__", false),
+            TokenKind::Eq => ("__eq__", false),
+            TokenKind::NotEq => ("__eq__", true),
+            _ => return Ok(None),
+        };
+        if let Some(r) = self.try_magic_binop(lv, rv, magic)? {
+            if negate {
+                return Ok(Some(Value::Bool(!self.truthy(&r))));
+            }
+            return Ok(Some(r));
+        }
+        Ok(None)
+    }
+
+    // Kết quả __len__ phải là số nguyên (int/float nguyên), chuyển về Int.
+    fn to_index_len(&self, v: Value) -> Result<Value, String> {
+        match v {
+            Value::Int(n) => Ok(Value::Int(n)),
+            Value::Float(f) if f.fract() == 0.0 => Ok(Value::Int(f as i64)),
+            _ => Err(format!(
+                "__len__() phải trả về số nguyên, nhận {}",
+                self.to_string(&v)
+            )),
+        }
     }
 
     fn method_err(&self, receiver: &Value, name: &str) -> String {
@@ -1212,7 +1431,50 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                 if n.name == "filter" {
                     return self.native_filter_call(args);
                 }
+                // len/str có thể trỏ tới struct magic __len__/__str__.
+                if n.name == "len" {
+                    if let Some(Value::Struct(s)) = args.first() {
+                        if s.ty.methods.contains_key("__len__") {
+                            let v = self.call_method(args[0].clone(), "__len__", Vec::new())?;
+                            return Ok(self.to_index_len(v)?);
+                        }
+                    }
+                    return (n.func)(&args);
+                }
+                if n.name == "str" {
+                    if let Some(Value::Struct(s)) = args.first() {
+                        if s.ty.methods.contains_key("__str__") {
+                            let v = self.call_method(args[0].clone(), "__str__", Vec::new())?;
+                            return Ok(Value::Str(self.to_string(&v)));
+                        }
+                    }
+                    return (n.func)(&args);
+                }
                 return (n.func)(&args);
+            }
+            Value::StructType(st) => {
+                // Gọi `Tên(args)` → tạo instance: gán đối số cho field theo thứ tự.
+                if args.len() > st.fields.len() {
+                    return Err(format!(
+                        "struct '{}' có {} field, nhận {} đối số",
+                        st.name,
+                        st.fields.len(),
+                        args.len()
+                    ));
+                }
+                let mut fields: IndexMap<String, Value> = st
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (i, arg) in args.into_iter().enumerate() {
+                    let fname = st.fields[i].0.clone();
+                    fields.insert(fname, arg);
+                }
+                return Ok(Value::Struct(StructVal {
+                    ty: std::rc::Rc::new(st),
+                    fields,
+                }));
             }
             Value::Func(def) => def,
             _ => return Err("Chỉ gọi được hàm, giá trị này không phải hàm".to_string()),
@@ -1322,6 +1584,16 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
             }
             Value::Func(f) => format!("<hàm {}>", f.name),
             Value::Native(n) => format!("<hàm {}>", n.name),
+            Value::StructType(t) => format!("<struct {}>", t.name),
+            Value::Struct(s) => {
+                let inner = s
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, self.to_string(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {{{}}}", s.ty.name, inner)
+            }
             Value::Nil => "nil".to_string(),
         }
     }
@@ -1913,6 +2185,44 @@ fn expect_index(v: &Value) -> Result<i64, String> {
     }
 }
 
+/// Đọc field của một struct (dùng cho `p.x`).
+fn get_struct_field(v: &Value, name: &str) -> Result<Value, String> {
+    match v {
+        Value::Struct(s) => s
+            .fields
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("struct '{}' không có field '{}'", s.ty.name, name)),
+        _ => Err(format!(
+            "giá trị {} không có field '{}'",
+            stringify_value(v),
+            name
+        )),
+    }
+}
+
+/// Đặt field của struct (bản sao mới; dùng cho `p.x = v`).
+fn set_struct_field(v: &Value, name: &str, val: Value) -> Result<Value, String> {
+    match v {
+        Value::Struct(s) => {
+            if !s.fields.contains_key(name) {
+                return Err(format!("struct '{}' không có field '{}'", s.ty.name, name));
+            }
+            let mut fields = s.fields.clone();
+            fields.insert(name.to_string(), val);
+            Ok(Value::Struct(StructVal {
+                ty: s.ty.clone(),
+                fields,
+            }))
+        }
+        _ => Err(format!(
+            "giá trị {} không có field '{}'",
+            stringify_value(v),
+            name
+        )),
+    }
+}
+
 /// Chuyển chỉ số sang usize; chỉ số âm đếm từ cuối như Python. Lỗi nếu ngoài phạm vi.
 fn expect_and_normalize_index(v: &Value, len: usize) -> Result<usize, String> {
     let raw = expect_index(v)?;
@@ -2111,6 +2421,7 @@ fn is_truthy_value(v: &Value) -> bool {
         Value::Str(s) => !s.is_empty(),
         Value::List(items) => !items.is_empty(),
         Value::Map(entries) => !entries.is_empty(),
+        Value::Struct(s) => !s.fields.is_empty(),
         _ => true,
     }
 }
@@ -2145,6 +2456,15 @@ fn stringify_value(v: &Value) -> String {
         }
         Value::Func(f) => format!("<hàm {}>", f.name),
         Value::Native(n) => format!("<hàm {}>", n.name),
+        Value::StructType(t) => format!("<struct {}>", t.name),
+        Value::Struct(s) => {
+            let inner: Vec<String> = s
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, stringify_value(v)))
+                .collect();
+            format!("{} {{{}}}", s.ty.name, inner.join(", "))
+        }
         Value::Nil => "nil".to_string(),
     }
 }
@@ -3167,10 +3487,160 @@ mod tests {
     }
 
     #[test]
-    fn method_call_needs_parens() {
-        // Không có '(' sau '.method' → lỗi cú pháp (chưa hỗ trợ field access).
-        let tokens = crate::lexer::Lexer::new(r#"let r = "a".upper;"#).tokenize().unwrap();
-        assert!(Parser::new(tokens).parse().is_err());
+    fn field_access_on_primitive_errors() {
+        // `x.name` không có '(' giờ là FIELD access (struct); với chuỗi thì
+        // lỗi runtime vì chuỗi không có field "upper".
+        let err = run(r#"let r = "a".upper;"#).unwrap_err();
+        assert!(err.contains("field"), "lỗi lạ: {}", err);
+    }
+
+    // ----- struct & magic methods -----
+
+    #[test]
+    fn struct_create_and_field_access() {
+        let src = r#"struct Point { x = 0; y = 0; }
+            let p = Point(3, 4);
+            let r = p.x * 10 + p.y;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(34));
+        // Giá trị mặc định khi không truyền đối số.
+        assert_eq!(run_and_get(r#"struct P { a = 7; b = 9; } let r = P().a;"#, "r"), Value::Int(7));
+        // Truyền một phần đối số: phần còn lại giữ mặc định.
+        assert_eq!(run_and_get(r#"struct P { a = 7; b = 9; } let r = P(1).b;"#, "r"), Value::Int(9));
+    }
+
+    #[test]
+    fn struct_methods_use_self() {
+        let src = r#"struct Vec2 {
+                x = 0; y = 0;
+                func mag() { return x * x + y * y; }
+                func dot(v) { return x * v.x + y * v.y; }
+                func length() { return self.mag(); }
+            }
+            let v = Vec2(3, 4);
+            let r1 = v.mag();
+            let r2 = v.dot(Vec2(1, 1));
+            let r3 = v.length();"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(25));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(7));
+        assert_eq!(run_and_get(src, "r3"), Value::Int(25));
+    }
+
+    #[test]
+    fn struct_field_assign_is_value_semantics() {
+        // Gán field cập nhật bản sao; biến khác tham chiếu không bị ảnh hưởng.
+        let src = r#"struct P { x = 0; y = 0; }
+            let p = P(1, 2);
+            let q = p;
+            p.x = 100;
+            let r1 = p.x;
+            let r2 = q.x;"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(100));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(1));
+    }
+
+    #[test]
+    fn struct_nested_field_assign() {
+        let src = r#"struct Inner { v = 0; }
+            struct Outer { i = Inner(); }
+            let o = Outer();
+            o.i.v = 42;
+            let r = o.i.v;"#;
+        assert_eq!(run_and_get(src, "r"), Value::Int(42));
+    }
+
+    #[test]
+    fn struct_magic_add_len_str() {
+        let src = r#"struct Money {
+                amount = 0.0;
+                currency = "VND";
+                func __add__(o) { return Money(amount + o.amount, currency); }
+                func __len__() { return 3; }
+                func __str__() { return str(amount) + " " + currency; }
+            }
+            let m = Money(10.5, "USD");
+            let s = m + Money(1.5, "USD");
+            let r1 = s.amount;
+            let r2 = len(m);
+            let r3 = str(m);"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Float(12.0));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(3));
+        assert_eq!(run_and_get(src, "r3"), Value::Str("10.5 USD".into()));
+    }
+
+    #[test]
+    fn struct_magic_eq_mul_div() {
+        let src = r#"struct V {
+                x = 0; y = 0;
+                func __eq__(o) { return x == o.x and y == o.y; }
+                func __mul__(k) { return V(x * k, y * k); }
+                func __div__(k) { return V(x / k, y / k); }
+            }
+            let a = V(2, 4);
+            let b = V(2, 4);
+            let r1 = a == b;
+            let r2 = a != V(9, 9);
+            let r3 = (a * 2).x;
+            let r4 = (V(6, 6) / 3).y;"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r2"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r3"), Value::Int(4));
+        assert_eq!(run_and_get(src, "r4"), Value::Int(2));
+    }
+
+    #[test]
+    fn struct_magic_getitem_setitem_contains() {
+        let src = r#"struct V {
+                x = 0; y = 0;
+                func __getitem__(i) { if i == 0 { return x; } return y; }
+                func __setitem__(i, v) { if i == 0 { self.x = v; } else { self.y = v; } return self; }
+                func __contains__(n) { return n == x or n == y; }
+            }
+            let v = V(3, 4);
+            let r1 = v[0];
+            v[1] = 9;
+            let r2 = v.y;
+            let r3 = 3 in v;
+            let r4 = 99 in v;"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(3));
+        assert_eq!(run_and_get(src, "r2"), Value::Int(9));
+        assert_eq!(run_and_get(src, "r3"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r4"), Value::Bool(false));
+    }
+
+    #[test]
+    fn struct_as_map_value_and_equality() {
+        // Struct dùng được trong map (cần Hash nhất quán với PartialEq).
+        let src = r#"struct P { x = 0; y = 0; }
+            let m = { "a": P(1, 2) };
+            let r1 = m.get("a").x;
+            let r2 = P(1, 2) == P(1, 2);
+            let r3 = P(1, 2) == P(9, 2);"#;
+        assert_eq!(run_and_get(src, "r1"), Value::Int(1));
+        assert_eq!(run_and_get(src, "r2"), Value::Bool(true));
+        assert_eq!(run_and_get(src, "r3"), Value::Bool(false));
+    }
+
+    #[test]
+    fn struct_errors() {
+        // Quá nhiều đối số.
+        let src1 = r#"struct P { x = 0; } let p = P(1, 2);"#;
+        assert!(run(src1).is_err());
+        // Field không tồn tại.
+        let src2 = r#"struct P { x = 0; } let p = P(); let r = p.z;"#;
+        let e2 = run(src2).unwrap_err();
+        assert!(e2.contains("field 'z'"), "{}", e2);
+        // Gán field không tồn tại.
+        let src3 = r#"struct P { x = 0; } let p = P(); p.z = 1;"#;
+        assert!(run(src3).is_err());
+        // Gọi phương thức không có.
+        let src4 = r#"struct P { x = 0; } let p = P(); p.nope();"#;
+        assert!(run(src4).is_err());
+    }
+
+    #[test]
+    fn struct_magic_len_must_be_int() {
+        let src = r#"struct P { x = 0; func __len__() { return "abc"; } } let r = len(P());"#;
+        assert!(run(src).is_err());
     }
 
     // ----- float -----
