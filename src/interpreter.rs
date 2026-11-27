@@ -6,7 +6,10 @@
 //!   Flow   = tín hiệu điều khiển (return) trong khi chạy
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
+
+use indexmap::IndexMap;
 
 use crate::ast::{Expr, Pattern, Stmt};
 use crate::token::TokenKind;
@@ -17,8 +20,8 @@ pub enum Value {
     Str(String),
     Bool(bool),
     List(Vec<Value>),
-    // Cặp (khóa, giá trị), giữ thứ tự chèn để in/lặp có thứ tự ổn định.
-    Map(Vec<(Value, Value)>),
+    // Cặp (khóa, giá trị) — IndexMap: giữ thứ tự chèn NHƯNG tra cứu O(1).
+    Map(IndexMap<Value, Value>),
     Func(FuncDef),
     Native(NativeFunc),
     Nil,
@@ -40,15 +43,65 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => {
-                // Với map, thứ tự không quan trọng — so theo tập (khóa, giá trị).
-                a.len() == b.len()
-                    && a.iter()
-                        .all(|(k, v)| b.iter().any(|(bk, bv)| k == bk && v == bv))
+                // Thứ tự không quan trọng — so theo tập (khóa, giá trị).
+                a.len() == b.len() && a.iter().all(|(k, v)| b.get(k) == Some(v))
             }
             (Value::Func(a), Value::Func(b)) => a.name == b.name,
             (Value::Native(a), Value::Native(b)) => a.name == b.name,
             (Value::Nil, Value::Nil) => true,
             _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+// Hash nhất quán với PartialEq (map băm theo tập để thứ tự không làm lệch).
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        use std::collections::hash_map::DefaultHasher;
+        match self {
+            Value::Int(n) => {
+                0u8.hash(state);
+                n.hash(state);
+            }
+            Value::Str(s) => {
+                1u8.hash(state);
+                s.hash(state);
+            }
+            Value::Bool(b) => {
+                2u8.hash(state);
+                b.hash(state);
+            }
+            Value::Nil => 3u8.hash(state),
+            Value::Func(f) => {
+                4u8.hash(state);
+                f.name.hash(state);
+            }
+            Value::Native(n) => {
+                5u8.hash(state);
+                n.name.hash(state);
+            }
+            Value::List(items) => {
+                6u8.hash(state);
+                items.len().hash(state);
+                for it in items {
+                    it.hash(state);
+                }
+            }
+            Value::Map(entries) => {
+                7u8.hash(state);
+                // Băm từng cặp (khóa, giá trị), sắp xếp rồi gộp — độc lập thứ tự.
+                let mut pair_hashes: Vec<u64> = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let mut hs = DefaultHasher::new();
+                    k.hash(&mut hs);
+                    v.hash(&mut hs);
+                    pair_hashes.push(hs.finish());
+                }
+                pair_hashes.sort_unstable();
+                pair_hashes.hash(state);
+            }
         }
     }
 }
@@ -474,15 +527,11 @@ impl Interpreter {
                 Ok(Value::List(out))
             }
             Expr::Dict(entries) => {
-                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                let mut out: IndexMap<Value, Value> = IndexMap::with_capacity(entries.len());
                 for (k, v) in entries {
                     let key = self.eval(k, env.clone())?;
                     let value = self.eval(v, env.clone())?;
-                    if let Some(idx) = map_index(&out, &key) {
-                        out[idx].1 = value;
-                    } else {
-                        out.push((key, value));
-                    }
+                    out.insert(key, value);
                 }
                 Ok(Value::Map(out))
             }
@@ -808,11 +857,6 @@ fn native_len(args: &[Value]) -> Result<Value, String> {
     }
 }
 
-// Tìm vị trí của khóa trong map (theo thứ tự chèn). Khóa so bằng Value::eq.
-fn map_index(entries: &[(Value, Value)], key: &Value) -> Option<usize> {
-    entries.iter().position(|(k, _)| k == key)
-}
-
 fn native_get(args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err("get() cần 2 đối số (list/map, chỉ số/khóa)".to_string());
@@ -831,10 +875,9 @@ fn native_get(args: &[Value]) -> Result<Value, String> {
             }
             Ok(items[i as usize].clone())
         }
-        Value::Map(entries) => match map_index(entries, &args[1]) {
-            Some(i) => Ok(entries[i].1.clone()),
-            None => Err(format!("get(map, khóa) — không có khóa này trong map")),
-        },
+        Value::Map(entries) => entries.get(&args[1]).cloned().ok_or_else(|| {
+            "get(map, khóa) — không có khóa này trong map".to_string()
+        }),
         _ => Err("get() cần list hoặc map ở đối số đầu".to_string()),
     }
 }
@@ -851,7 +894,7 @@ fn native_contains(args: &[Value]) -> Result<Value, String> {
             };
             Ok(Value::Bool(s.contains(sub)))
         }
-        Value::Map(entries) => Ok(Value::Bool(map_index(entries, &args[1]).is_some())),
+        Value::Map(entries) => Ok(Value::Bool(entries.contains_key(&args[1]))),
         _ => Err("contains() cần list, chuỗi hoặc map ở đối số đầu".to_string()),
     }
 }
@@ -865,12 +908,7 @@ fn native_map_set(args: &[Value]) -> Result<Value, String> {
     };
     check_len("map", entries.len() + 1, MAX_LIST_LEN)?;
     let mut out = entries.clone();
-    let key = args[1].clone();
-    if let Some(idx) = map_index(&out, &key) {
-        out[idx].1 = args[2].clone();
-    } else {
-        out.push((key, args[2].clone()));
-    }
+    out.insert(args[1].clone(), args[2].clone());
     Ok(Value::Map(out))
 }
 
@@ -881,7 +919,7 @@ fn native_map_keys(args: &[Value]) -> Result<Value, String> {
     let Value::Map(entries) = &args[0] else {
         return Err("map_keys() cần map ở đối số đầu".to_string());
     };
-    Ok(Value::List(entries.iter().map(|(k, _)| k.clone()).collect()))
+    Ok(Value::List(entries.keys().cloned().collect()))
 }
 
 fn native_chars(args: &[Value]) -> Result<Value, String> {
@@ -995,11 +1033,8 @@ fn native_map_remove(args: &[Value]) -> Result<Value, String> {
     let Value::Map(entries) = &args[0] else {
         return Err("map_remove() cần map ở đối số đầu".to_string());
     };
-    let out: Vec<(Value, Value)> = entries
-        .iter()
-        .filter(|(k, _)| k != &args[1])
-        .cloned()
-        .collect();
+    let mut out = entries.clone();
+    out.shift_remove(&args[1]);
     Ok(Value::Map(out))
 }
 
@@ -1612,7 +1647,7 @@ mod tests {
     fn map_dup_key_overwrites() {
         assert_eq!(
             run_and_get(r#"let m = { "a": 1, "a": 2 };"#, "m"),
-            Value::Map(vec![(Value::Str("a".into()), Value::Int(2))])
+            Value::Map(indexmap::IndexMap::from([(Value::Str("a".into()), Value::Int(2))]))
         );
     }
 
@@ -1654,7 +1689,10 @@ mod tests {
             run_and_get(r#"let cfg = { "opts": { "retry": 3 } }; let r = get(get(cfg, "opts"), "retry");"#, "r"),
             Value::Int(3)
         );
-        assert_eq!(run_and_get(r#"let e = {};"#, "e"), Value::Map(vec![]));
+        assert_eq!(
+            run_and_get(r#"let e = {};"#, "e"),
+            Value::Map(indexmap::IndexMap::new())
+        );
     }
 
     #[test]
