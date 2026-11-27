@@ -88,7 +88,11 @@ impl Parser {
         let mut params = Vec::new();
         if !self.check(&TokenKind::RParen) {
             loop {
-                params.push(self.expect_ident("tên tham số")?);
+                let param = self.expect_ident("tên tham số")?;
+                if params.contains(&param) {
+                    return Err(self.error(format!("tham số trùng tên '{}'", param)));
+                }
+                params.push(param);
                 if !self.match_or(TokenKind::Comma) {
                     break;
                 }
@@ -266,7 +270,7 @@ impl Parser {
                 }
                 Ok(Expr::List(items))
             }
-            other => Err(self.error(format!("mong đợi biểu thức, gặp {:?}", other))),
+            other => Err(self.error_at(token.line, format!("mong đợi biểu thức, gặp {:?}", other))),
         }
     }
 
@@ -314,7 +318,7 @@ impl Parser {
             TokenKind::Str(s) => Ok(Pattern::Literal(Expr::Str(s))),
             TokenKind::True => Ok(Pattern::Literal(Expr::Bool(true))),
             TokenKind::False => Ok(Pattern::Literal(Expr::Bool(false))),
-            other => Err(self.error(format!("pattern không hợp lệ: {:?}", other))),
+            other => Err(self.error_at(token.line, format!("pattern không hợp lệ: {:?}", other))),
         }
     }
 
@@ -386,7 +390,7 @@ impl Parser {
         let token = self.advance();
         match token.kind {
             TokenKind::Ident(name) => Ok(name),
-            other => Err(self.error(format!("mong đợi {}, gặp {:?}", what, other))),
+            other => Err(self.error_at(token.line, format!("mong đợi {}, gặp {:?}", what, other))),
         }
     }
 
@@ -422,6 +426,12 @@ impl Parser {
 
     fn error(&self, msg: String) -> String {
         format!("Lỗi cú pháp dòng {}: {}", self.peek().line, msg)
+    }
+
+    // Dùng khi đã advance() nuốt token lỗi rồi: self.peek() giờ trỏ token kế,
+    // nên phải dùng đúng dòng của token vừa nuốt để không lệch số dòng.
+    fn error_at(&self, line: usize, msg: String) -> String {
+        format!("Lỗi cú pháp dòng {}: {}", line, msg)
     }
 }
 
@@ -522,5 +532,21 @@ mod tests {
         let tokens = Lexer::new("if true { println(1);").tokenize().unwrap();
         let err = Parser::new(tokens).parse().unwrap_err();
         assert!(err.contains("mong đợi '}'"));
+    }
+
+    #[test]
+    fn duplicate_param_errors() {
+        let tokens = Lexer::new("func f(a, a) { return a; }").tokenize().unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.contains("trùng tên"));
+    }
+
+    #[test]
+    fn error_reports_correct_line_multiline() {
+        // 'let d = ;' nằm dòng 5 (1,2,blank=3,c=4,d=5). Không được lệch thành 6.
+        let src = "let a = 1;\nlet b = 2;\n\nlet c = 3;\nlet d = ;\n";
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.contains("dòng 5"), "lỗi lệch số dòng: {}", err);
     }
 }

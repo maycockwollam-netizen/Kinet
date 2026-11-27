@@ -627,6 +627,11 @@ fn native_split(args: &[Value]) -> Result<Value, String> {
     let Value::Str(sep) = &args[1] else {
         return Err("split() cần chuỗi phân tách ở đối số thứ 2".to_string());
     };
+    if sep.is_empty() {
+        // Rust split("") sinh ["a","b"] kèm 2 phần tử rỗng — hầu như luôn là
+        // lỗi người dùng, nên báo rõ thay vì cho kết quả lạ.
+        return Err("split(): dấu phân tách không được rỗng".to_string());
+    }
     let parts: Vec<Value> = s
         .split(sep)
         .map(|p| Value::Str(p.to_string()))
@@ -874,6 +879,12 @@ mod tests {
         let src = "func f(n) { return f(n + 1); } f(0);";
         let err = run(src).unwrap_err();
         assert!(err.contains("Độ sâu"));
+    }
+
+    #[test]
+    fn split_empty_separator_errors() {
+        let err = run(r#"let a = split("ab", "");"#).unwrap_err();
+        assert!(err.contains("rỗng"));
     }
 
     #[test]
