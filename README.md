@@ -92,6 +92,35 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 - Logic: `and` `or` `not` (đánh giá lười — short-circuit)
 - Phép gán: `=`
 
+## Gọi agent Kinetic SDK thật (Mốc 3)
+
+Kinet có native function `agent_run(goal)` để chạy agent Kinetic SDK thật, qua bridge Python ở `bridge/kinet_agent.py`:
+
+```c
+// goal-completion loop: hàm viết bằng Kinet, agent chạy SDK thật bên trong
+func run_agent(goal, max_rounds) {
+    for round in range(0, max_rounds) {
+        let result = agent_run(goal);              // gọi Agent(...).run(goal)
+        if starts_with(result, "goal complete") {
+            return round + 1;
+        }
+    }
+    return 0;
+}
+```
+
+Chạy demo: `cargo run -- examples/agent_real.kinet`
+
+### Cấu hình biến môi trường
+| Biến | Ý nghĩa | Mặc định |
+|---|---|---|
+| `KINET_SDK_DIR` | thư mục chứa gói `kinetic_sdk` | `/tmp/kinetic-sdk` |
+| `KINET_BRIDGE` | đường dẫn `kinet_agent.py` | `bridge/kinet_agent.py` |
+| `OPENAI_API_KEY` | nếu có → dùng `LiteLLMClient` (LLM thật) | không có → `MockLLMClient` offline |
+| `KINET_MODEL` | model khi dùng LLM thật | `gpt-4o-mini` |
+
+> `agent_run` hiện gọi bridge Python qua tiến trình (`std::process::Command`, không dùng shell nên tránh được injection). Bước nâng cấp tiếp theo là embed trực tiếp qua PyO3 (như `_kinetic_rs` của SDK) để bỏ chi phí spawn tiến trình mỗi lần gọi.
+
 ## Cấu trúc code
 
 | Module | Vai trò |
@@ -109,8 +138,9 @@ Pattern hỗ trợ: literal (`1`, `"x"`, `true`/`false`), biến bắt (`case e 
 - [x] `for` loop + `break`/`continue`
 - [x] Hàm string (`split`, `starts_with`, `ends_with`, `trim`, `replace`, `contains`)
 - [x] Cờ debug `--tokens` / `--ast` (xem pipeline)
-- [x] Unit test (34 test: lexer, parser, interpreter)
+- [x] Unit test (41 test: lexer, parser, interpreter)
 - [ ] Kiểu `float` (hiện chỉ có `i64`)
-- [ ] **Nối Kinetic SDK** qua PyO3 (như `_kinetic_rs`) — Kinet điều khiển agent thật
+- [x] **Mốc 3:** Kinet điều khiển agent Kinetic SDK thật (agent_run → bridge Python)
+- [ ] Nâng bridge lên embed PyO3 trực tiếp (bỏ spawn tiến trình)
 - [ ] Compile sang bytecode (thay vì tree-walking) để nhanh hơn
 - [ ] Sandbox + bảo mật (giới hạn quyền truy cập)

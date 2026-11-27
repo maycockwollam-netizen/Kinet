@@ -133,6 +133,7 @@ impl Interpreter {
                 ("ends_with", native_ends_with as fn(&[Value]) -> Result<Value, String>),
                 ("trim", native_trim as fn(&[Value]) -> Result<Value, String>),
                 ("replace", native_replace as fn(&[Value]) -> Result<Value, String>),
+                ("agent_run", native_agent_run as fn(&[Value]) -> Result<Value, String>),
             ] {
                 g.define(name, Value::Native(NativeFunc { name, func }));
             }
@@ -535,6 +536,50 @@ impl Interpreter {
         }
         Ok(out)
     }
+}
+
+// ---------- Bridge sang Kinetic SDK ----------
+
+/// agent_run(goal) — điều khiển agent Kinetic SDK thật.
+///
+/// Gọi `python3 <bridge>/kinet_agent.py <goal>` (SDK nằm tại `KINET_SDK_DIR`,
+/// mặc định `/tmp/kinetic-sdk`). Cấu hình được qua biến môi trường `KINET_SDK_DIR`
+/// và `KINET_BRIDGE`; đọc thêm `OPENAI_API_KEY` để dùng LLM thật nếu muốn.
+fn native_agent_run(args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        return Err("agent_run() cần 1 đối số (goal)".to_string());
+    }
+    let Value::Str(goal) = &args[0] else {
+        return Err("agent_run() cần chuỗi goal ở đối số đầu".to_string());
+    };
+
+    let sdk_dir = std::env::var("KINET_SDK_DIR")
+        .unwrap_or_else(|_| "/tmp/kinetic-sdk".to_string());
+    let bridge = std::env::var("KINET_BRIDGE").unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|d| d.join("bridge").join("kinet_agent.py"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "bridge/kinet_agent.py".to_string())
+    });
+
+    let output = std::process::Command::new("python3")
+        .arg(&bridge)
+        .arg(goal)
+        .env("PYTHONPATH", &sdk_dir)
+        .output()
+        .map_err(|e| format!("agent_run() không chạy được python3: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        return Err(if msg.is_empty() {
+            "agent_run() thất bại (SDK trả lỗi)".to_string()
+        } else {
+            format!("agent_run() thất bại: {}", msg)
+        });
+    }
+
+    Ok(Value::Str(String::from_utf8_lossy(&output.stdout).trim().to_string()))
 }
 
 // ---------- Hàm native (builtin) ----------

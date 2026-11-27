@@ -1,0 +1,33 @@
+// agent_real.kinet — Mốc 3: Kinet điều khiển agent Kinetic SDK THẬT
+//
+// agent_run(goal) là native function gọi bridge Python,
+// bên trong chạy `Agent(...).run(goal)` của Kinetic SDK.
+//
+// Chạy cần SDK: mặc định /tmp/kinetic-sdk, đổi bằng biến KINET_SDK_DIR.
+// Không có OPENAI_API_KEY → SDK dùng MockLLM offline (đủ để demo).
+
+// Goal-completion loop viết hoàn toàn bằng Kinet, gọi agent thật mỗi vòng.
+func run_agent(goal, max_rounds) {
+    let completed = 0;
+
+    for round in range(0, max_rounds) {
+        let result = agent_run(goal);            // ← gọi Kinetic SDK thật
+        println("  vòng ", round + 1, ": ", result);
+
+        if starts_with(result, "goal complete") {
+            println("🎯 Hoàn thành: ", goal);
+            completed = round + 1;
+            break;
+        }
+    }
+
+    if completed == 0 {
+        println("⚠️  Quá số vòng tối đa — báo cáo thất bại");
+    }
+    return completed;
+}
+
+println("Bắt đầu agent thật (Kinetic SDK)...");
+let rounds = run_agent("Sửa lỗi #42", 3);
+println("Tổng kết: hoàn thành trong ", rounds, " vòng");
+println("Xong!");
