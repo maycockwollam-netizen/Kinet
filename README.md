@@ -16,7 +16,7 @@ cargo run -- file.kinet         # chạy file source
 cargo run -- -e "code"        # chạy code từ dòng lệnh
 cargo run -- --tokens file    # xem danh sách token (Lexer)
 cargo run -- --ast file       # xem cây cú pháp (Parser)
-cargo run -- --vm file        # chạy bằng bytecode VM (phase 1 — lõi + đệ quy sâu)
+cargo run -- --vm file        # chạy bằng bytecode VM (phase 2)
 cargo test                    # chạy unit test
 ```
 
@@ -294,7 +294,7 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 
 → Nghĩa là mày có thể dùng Kinet để viết trình thông dịch/ngôn ngữ khác, công cụ, thư viện... đúng tinh thần "tạo gì cũng được, miễn có trình".
 
-## Bytecode VM (phase 1) — `--vm`
+## Bytecode VM (phase 2) — `--vm`
 
 Mục tiêu mốc C1 trong roadmap: biên dịch AST → bytecode rồi chạy bằng vòng lặp
 VM với **call stack tường minh nằm trên heap** — nên **đệ quy sâu không còn tràn
@@ -305,12 +305,14 @@ cargo run -- --vm file.kinet        # VM còn tính được sumto(100000)
 cargo run -- file.kinet             # tree-walker (mặc định) giới hạn 2000
 ```
 
-- Phase 1 hỗ trợ phần lõi: literal, biến local/global, toán tử, `and`/`or`,
-  `if`/`elif`/`else`, `while`, `for` (list/range), hàm + đệ quy, `return`,
-  `print`/`println`, list/tuple + `[]`, `let (a, b) = ...`, tree-walker như default
-  giữ nguyên.
-- Chưa hỗ trợ (báo lỗi rõ): struct/class, closure/lambda, `try`, `with`, `match`,
-  magic methods, comprehension, slice, `in`... — sẽ bổ sung ở các phase sau.
+- Phase 1: literal, biến local/global, toán tử, `and`/`or`, `if`/`elif`/`else`,
+  `while`, `for` (list/range), hàm + đệ quy, `return`, `print`/`println`,
+  list/tuple + `[]`, `let (a, b) = ...`.
+- Phase 2 thêm: **map/set literal** `{...}`, `in`, **slice** `a[1:4]`, gán `a[i] = v`,
+  **method trên kiểu** (`s.upper()`, `lst.append()`, `m.get()`...), **`match`**,
+  **comprehension** (list + dict), **`try`/`catch`/`finally`** (có `throw`).
+- Chưa hỗ trợ (báo lỗi rõ): struct/class, closure/lambda, `with` — bổ sung ở
+  phase sau.
 
 ## Giới hạn & bảo mật
 - **Sandbox file I/O MẶC ĐỊNH BẬT**: `read_file`/`write_file`/`import` bị khóa trong **thư mục hiện hành**. Đổi root bằng `KINET_SANDBOX_ROOT=/đường/dẫn`; tắt để chạy code tin cậy bằng `KINET_SANDBOX=none`. Chặn cả `..`, đường dẫn tuyệt đối **và symlink** (canonicalize rồi kiểm tra nằm trong root).

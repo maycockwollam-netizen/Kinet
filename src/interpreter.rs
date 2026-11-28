@@ -2704,7 +2704,7 @@ pub fn expect_and_normalize_index(v: &Value, len: usize) -> Result<usize, String
 
 /// Điều chỉnh start/end của slice theo quy tắc Python (PySlice_AdjustIndices):
 /// xử lý step âm/dương và clamp biên. Trả về (lo, hi) để lặp `i` từ lo tới hi.
-fn adjust_slice(
+pub fn adjust_slice(
     len: usize,
     start: Option<i64>,
     end: Option<i64>,

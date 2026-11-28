@@ -79,7 +79,9 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
 ### C1 — Bytecode / VM  (≈ 1–2 tháng)
 - [x] **Phase 1**: biên dịch AST → bytecode + VM loop với call stack tường minh trên heap —
       đệ quy sâu không tràn stack (thử: `--vm` tính được `sumto(100000)`) (2026-11-27)
-- [ ] Phase 2+: struct, closure/upvalue, try/with/match, magic, slice, comprehension
+- [x] **Phase 2**: map/set literal, `in`, slice, gán `a[i]=v`, method kiểu, `match`,
+      comprehension, `try`/`catch`/`finally` (+ `throw`) — có lỗi unwinding tới handler (2026-11-27)
+- [ ] Phase 3: struct/class + closure/upvalue, `with`, magic methods
 - [ ] Đo benchmark, tối ưu hot path
 
 ### C3 — Tooling  (≈ 2–3 tuần)
