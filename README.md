@@ -16,7 +16,7 @@ cargo run -- file.kinet         # chạy file source
 cargo run -- -e "code"        # chạy code từ dòng lệnh
 cargo run -- --tokens file    # xem danh sách token (Lexer)
 cargo run -- --ast file       # xem cây cú pháp (Parser)
-cargo run -- --vm file        # chạy bằng bytecode VM (phase 2)
+cargo run -- --vm file        # chạy bằng bytecode VM (phase 3)
 cargo test                    # chạy unit test
 ```
 
@@ -294,25 +294,24 @@ Chạy: `cargo run -- examples/mini_interp.kinet`
 
 → Nghĩa là mày có thể dùng Kinet để viết trình thông dịch/ngôn ngữ khác, công cụ, thư viện... đúng tinh thần "tạo gì cũng được, miễn có trình".
 
-## Bytecode VM (phase 2) — `--vm`
+## Bytecode VM (phase 3) — `--vm`
 
-Mục tiêu mốc C1 trong roadmap: biên dịch AST → bytecode rồi chạy bằng vòng lặp
-VM với **call stack tường minh nằm trên heap** — nên **đệ quy sâu không còn tràn
-stack OS** (khác tree-walker giới hạn 2000):
+Biên dịch AST → bytecode rồi chạy bằng vòng lặp VM với **call stack tường minh
+trên heap** — **đệ quy sâu không còn tràn stack OS** (khác tree-walker giới hạn 2000):
 
 ```bash
 cargo run -- --vm file.kinet        # VM còn tính được sumto(100000)
 cargo run -- file.kinet             # tree-walker (mặc định) giới hạn 2000
 ```
 
-- Phase 1: literal, biến local/global, toán tử, `and`/`or`, `if`/`elif`/`else`,
-  `while`, `for` (list/range), hàm + đệ quy, `return`, `print`/`println`,
-  list/tuple + `[]`, `let (a, b) = ...`.
-- Phase 2 thêm: **map/set literal** `{...}`, `in`, **slice** `a[1:4]`, gán `a[i] = v`,
-  **method trên kiểu** (`s.upper()`, `lst.append()`, `m.get()`...), **`match`**,
-  **comprehension** (list + dict), **`try`/`catch`/`finally`** (có `throw`).
-- Chưa hỗ trợ (báo lỗi rõ): struct/class, closure/lambda, `with` — bổ sung ở
-  phase sau.
+- Phase 1: literal, biến, toán tử, `and`/`or`, `if`/`elif`/`else`, `while`, `for`,
+  hàm + đệ quy, list/tuple, `let (a, b) = ...`.
+- Phase 2 thêm: map/set literal, `in`, slice, gán `a[i]=v`, method trên kiểu,
+  `match`, comprehension, `try`/`catch`/`finally` + `throw`.
+- Phase 3 thêm: **`struct`** (field `p.x`, gán `p.x = v`, method + `self`, field dùng
+  tên trực tiếp), **magic methods** (`__add__`/`__len__`/`__str__`/`__eq__`/
+  `__getitem__`/`__setitem__`/`__contains__`), **`with`** (context manager).
+- Chưa hỗ trợ (báo lỗi rõ): closure/lambda (chưa có upvalue) — bổ sung ở phase sau.
 
 ## Giới hạn & bảo mật
 - **Sandbox file I/O MẶC ĐỊNH BẬT**: `read_file`/`write_file`/`import` bị khóa trong **thư mục hiện hành**. Đổi root bằng `KINET_SANDBOX_ROOT=/đường/dẫn`; tắt để chạy code tin cậy bằng `KINET_SANDBOX=none`. Chặn cả `..`, đường dẫn tuyệt đối **và symlink** (canonicalize rồi kiểm tra nằm trong root).

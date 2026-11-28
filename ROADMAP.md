@@ -81,7 +81,9 @@ Cái mày cần NGAY: viết agent script thật, gọi SDK liên tục, trao đ
       đệ quy sâu không tràn stack (thử: `--vm` tính được `sumto(100000)`) (2026-11-27)
 - [x] **Phase 2**: map/set literal, `in`, slice, gán `a[i]=v`, method kiểu, `match`,
       comprehension, `try`/`catch`/`finally` (+ `throw`) — có lỗi unwinding tới handler (2026-11-27)
-- [ ] Phase 3: struct/class + closure/upvalue, `with`, magic methods
+- [x] **Phase 3**: `struct` (field/method/self), magic methods (`__add__`/`__len__`/`__str__`/
+      `__eq__`/`__getitem__`/`__setitem__`/`__contains__`), `with` (context manager) (2026-11-27)
+- [ ] Phase 4: closure/upvalue (lambda, hàm first-class, map/filter qua VM)
 - [ ] Đo benchmark, tối ưu hot path
 
 ### C3 — Tooling  (≈ 2–3 tuần)

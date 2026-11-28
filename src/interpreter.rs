@@ -33,6 +33,8 @@ pub enum Value {
     StructType(StructTypeDef),
     // Một instance struct: fields + methods nhúng sẵn.
     Struct(StructVal),
+    // Đối tượng do VM quản lý (struct instance của VM).
+    Vm(crate::vm::VmObj),
     Nil,
 }
 
@@ -141,6 +143,13 @@ impl PartialEq for Value {
             // Struct type: so theo tên; instance: theo tên + nội dung field.
             (Value::StructType(a), Value::StructType(b)) => a.name == b.name,
             (Value::Struct(a), Value::Struct(b)) => a.ty.name == b.ty.name && a.fields == b.fields,
+            (Value::Vm(a), Value::Vm(b)) => match (a, b) {
+                (crate::vm::VmObj::Struct(x), crate::vm::VmObj::Struct(y)) => {
+                    x.ty_name == y.ty_name && x.fields == y.fields
+                }
+                #[allow(unreachable_patterns)]
+                _ => false,
+            },
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -192,6 +201,16 @@ impl Hash for Value {
                 for (k, v) in &s.fields {
                     k.hash(state);
                     v.hash(state);
+                }
+            }
+            Value::Vm(o) => match o {
+                crate::vm::VmObj::Struct(s) => {
+                    13u8.hash(state);
+                    s.ty_name.hash(state);
+                    for (k, v) in &s.fields {
+                        k.hash(state);
+                        v.hash(state);
+                    }
                 }
             }
             Value::List(items) => {
@@ -1867,6 +1886,17 @@ fn eval_match(&mut self, value: &Expr, arms: &[crate::ast::MatchArm], env: EnvRe
                     .join(", ");
                 format!("{} {{{}}}", s.ty.name, inner)
             }
+            Value::Vm(o) => match o {
+                crate::vm::VmObj::Struct(s) => {
+                    let inner = s
+                        .fields
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, self.to_string(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{} {{{}}}", s.ty_name, inner)
+                }
+            }
             Value::Nil => "nil".to_string(),
         }
     }
@@ -2942,6 +2972,16 @@ pub fn stringify_value(v: &Value) -> String {
                 .map(|(k, v)| format!("{}: {}", k, stringify_value(v)))
                 .collect();
             format!("{} {{{}}}", s.ty.name, inner.join(", "))
+        }
+        Value::Vm(o) => match o {
+            crate::vm::VmObj::Struct(s) => {
+                let inner: Vec<String> = s
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, stringify_value(v)))
+                    .collect();
+                format!("{} {{{}}}", s.ty_name, inner.join(", "))
+            }
         }
         Value::Nil => "nil".to_string(),
     }

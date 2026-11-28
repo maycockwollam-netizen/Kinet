@@ -6,7 +6,7 @@
 //!   cargo run -- -e "code"       → chạy code từ tham số
 //!   cargo run -- --tokens file   → xem danh sách token (Lexer)
 //!   cargo run -- --ast file      → xem cây cú pháp (Parser)
-//!   cargo run -- --vm file       → chạy bằng bytecode VM (phase 2)
+//!   cargo run -- --vm file       → chạy bằng bytecode VM (phase 3)
 
 mod ast;
 mod interpreter;

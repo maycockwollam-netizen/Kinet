@@ -49,9 +49,13 @@ pub enum Instr {
     SetIndex,
     Slice,
     In,
-    // Gọi phép tính/method trên giá trị: `value.name(args)` (native).
+    // Gọi phép tính/method trên giá trị: `value.name(args)` (native/struct).
     CallMethod(String, u32),
-    // Gọi hàm/native theo TÊN (phase 1++ chưa có closure/giá trị hàm).
+    // Tạo instance struct: `Tên(args)`.
+    CallStruct(String, u32),
+    GetField(String),
+    SetField(String),
+    // Gọi hàm/native theo TÊN (chưa có closure/giá trị hàm).
     Call(String, u32),
     Return,
     Throw,
@@ -62,15 +66,44 @@ pub enum Instr {
 
 #[derive(Debug, Clone)]
 pub struct FuncCode {
+    // arity = số tham số; n_field_slots = số slot 'self'+fields khi là method của struct.
     pub arity: usize,
+    pub n_field_slots: usize,
     pub n_slots: usize,
     // Rc để gọi hàm không phải clone toàn bộ bytecode mỗi lần.
     pub code: std::rc::Rc<Vec<Instr>>,
 }
 
+/// Đối tượng chạy bên trong VM (struct instance...). Tách riêng khỏi Value để
+/// không phá vỡ cây tree-walker.
+#[derive(Debug, Clone)]
+pub enum VmObj {
+    Struct(StructValVm),
+}
+
+#[derive(Debug, Clone)]
+pub struct StructValVm {
+    pub ty_name: String,
+    pub fields: indexmap::IndexMap<String, Value>,
+}
+
+/// Thông tin method của struct khi biên dịch.
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub func_name: String,
+}
+
+/// Định nghĩa struct trong VM (được đăng ký LÚC BIÊN DỊCH).
+#[derive(Debug, Clone)]
+pub struct StructDefVm {
+    pub fields: Vec<String>,
+    pub methods: HashMap<String, MethodInfo>,
+}
+
 pub struct Program {
     pub main: FuncCode,
     pub functions: HashMap<String, FuncCode>,
+    pub structs: HashMap<String, StructDefVm>,
 }
 
 // ---------- Compiler ----------
@@ -80,6 +113,8 @@ struct Scope {
     names: HashMap<String, u32>,
     block_markers: Vec<u32>,
     next_slot: u32,
+    // Số slot CAO NHẤT từng đạt — frame runtime phải to bằng giá trị này.
+    max_slots: u32,
 }
 
 impl Scope {
@@ -94,6 +129,9 @@ impl Scope {
     fn declare(&mut self, name: &str) -> u32 {
         let slot = self.next_slot;
         self.next_slot += 1;
+        if self.next_slot > self.max_slots {
+            self.max_slots = self.next_slot;
+        }
         self.names.insert(name.to_string(), slot);
         slot
     }
@@ -113,6 +151,7 @@ struct Compiler {
     scope: Scope,
     is_top: bool,
     functions: HashMap<String, FuncCode>,
+    structs: HashMap<String, StructDefVm>,
     loops: Vec<LoopCtx>,
 }
 
@@ -122,18 +161,39 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program, String> {
         scope: Scope::default(),
         is_top: true,
         functions: HashMap::new(),
+        structs: HashMap::new(),
         loops: Vec::new(),
     };
+    // Pre-pass: đăng ký tên + field của struct để gọi Tên(...)/p.field hoạt động
+    // bất kể thứ tự xuất hiện trong source.
+    for s in stmts {
+        // Gỡ lớp Ann (dòng) — statement thường bọc trong Ann.
+        let s = match s {
+            Stmt::Ann { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        if let Stmt::Struct { name, fields, .. } = s {
+            c.structs.insert(
+                name.clone(),
+                StructDefVm {
+                    fields: fields.iter().map(|(n, _)| n.clone()).collect(),
+                    methods: HashMap::new(),
+                },
+            );
+        }
+    }
     c.compile_body(stmts)?;
     c.code.push(Instr::Halt);
     let main = FuncCode {
         arity: 0,
-        n_slots: c.scope.next_slot as usize,
+        n_field_slots: 0,
+        n_slots: c.scope.max_slots as usize,
         code: std::rc::Rc::new(c.code),
     };
     Ok(Program {
         main,
         functions: c.functions,
+        structs: c.structs,
     })
 }
 
@@ -324,6 +384,58 @@ impl Compiler {
                 self.compile_func(name, params, body)?;
                 Ok(())
             }
+            Stmt::Struct {
+                name,
+                fields,
+                methods,
+            } => {
+                // Pre-pass đã đăng ký structs[name]; giờ chỉ compile các method.
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                for m in methods {
+                    self.compile_struct_method(name, m, &field_names)?;
+                }
+                Ok(())
+            }
+            Stmt::With { expr, var, body } => {
+                // with expr as v { body } → __enter__() → body → __exit__(exc) luôn chạy.
+                let man_slot = self.scope.declare("$with_man");
+                let ent_slot = self.scope.declare("$with_ent");
+                self.compile_expr(expr)?;
+                self.code.push(Instr::StoreSlot(man_slot));
+                self.code.push(Instr::LoadSlot(man_slot));
+                self.code.push(Instr::CallMethod("__enter__".to_string(), 0));
+                self.code.push(Instr::StoreSlot(ent_slot));
+                if let Some(v) = var {
+                    self.code.push(Instr::LoadSlot(ent_slot));
+                    self.store_var(v);
+                    self.code.push(Instr::Pop);
+                }
+                // Nhánh thành công.
+                let catch_pc = self.emit_jump_placeholder(Instr::TryBegin(0));
+                self.scope.push_block();
+                self.compile_body(body)?;
+                self.scope.pop_block();
+                self.code.push(Instr::TryEnd);
+                self.code.push(Instr::LoadSlot(man_slot));
+                self.code.push(Instr::PushNil);
+                self.code.push(Instr::CallMethod("__exit__".to_string(), 1));
+                self.code.push(Instr::Pop);
+                let jd = self.emit_jump_placeholder(Instr::Jump(0));
+                // Nhánh lỗi: __exit__(lỗi) rồi ném lại.
+                let catch_index = self.code.len();
+                self.patch(catch_pc, catch_index);
+                let err_slot = self.scope.declare("$with_err");
+                self.code.push(Instr::StoreSlot(err_slot));
+                self.code.push(Instr::LoadSlot(man_slot));
+                self.code.push(Instr::LoadSlot(err_slot));
+                self.code.push(Instr::CallMethod("__exit__".to_string(), 1));
+                self.code.push(Instr::Pop);
+                self.code.push(Instr::LoadSlot(err_slot));
+                self.code.push(Instr::Throw);
+                let done = self.code.len();
+                self.patch(jd, done);
+                Ok(())
+            }
             Stmt::Return(e) => {
                 self.compile_expr(e)?;
                 self.code.push(Instr::Return);
@@ -400,7 +512,8 @@ impl Compiler {
             code: Vec::new(),
             scope: Scope::default(),
             is_top: false,
-            functions: std::mem::take(&mut self.functions),
+            functions: HashMap::new(),
+            structs: std::mem::take(&mut self.structs),
             loops: Vec::new(),
         };
         for p in params {
@@ -410,11 +523,58 @@ impl Compiler {
         inner.code.push(Instr::Return); // rơi khỏi đáy hàm → trả nil
         let fc = FuncCode {
             arity: params.len(),
-            n_slots: inner.scope.next_slot as usize,
+            n_field_slots: 0,
+            n_slots: inner.scope.max_slots as usize,
             code: std::rc::Rc::new(inner.code),
         };
         inner.functions.insert(name.to_string(), fc);
         self.functions = inner.functions;
+        self.structs = inner.structs;
+        Ok(())
+    }
+
+    // Biên dịch method của struct: scope = [self, field0, field1, ..., params...].
+    fn compile_struct_method(
+        &mut self,
+        struct_name: &str,
+        m: &crate::ast::MethodDef,
+        field_names: &[String],
+    ) -> Result<(), String> {
+        let mut inner = Compiler {
+            code: Vec::new(),
+            scope: Scope::default(),
+            is_top: false,
+            functions: std::mem::take(&mut self.functions),
+            structs: std::mem::take(&mut self.structs),
+            loops: Vec::new(),
+        };
+        inner.scope.declare("self");
+        for f in field_names {
+            inner.scope.declare(f);
+        }
+        let n_field_slots = inner.scope.next_slot as usize;
+        for p in &m.params {
+            inner.scope.declare(&p.name);
+        }
+        inner.compile_body(&m.body)?;
+        inner.code.push(Instr::Return);
+        let func_name = format!("{}.{}", struct_name, m.name);
+        let fc = FuncCode {
+            arity: m.params.len(),
+            n_field_slots,
+            n_slots: inner.scope.max_slots as usize,
+            code: std::rc::Rc::new(inner.code),
+        };
+        inner.functions.insert(func_name.clone(), fc);
+        self.functions = inner.functions;
+        self.structs = inner.structs;
+        // Ghi method vào định nghĩa struct.
+        if let Some(st) = self.structs.get_mut(struct_name) {
+            st.methods.insert(
+                m.name.clone(),
+                MethodInfo { func_name },
+            );
+        }
         Ok(())
     }
 
@@ -472,7 +632,12 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(&a.value)?;
                 }
-                self.code.push(Instr::Call(name.clone(), args.len() as u32));
+                if self.structs.contains_key(name) {
+                    self.code
+                        .push(Instr::CallStruct(name.clone(), args.len() as u32));
+                } else {
+                    self.code.push(Instr::Call(name.clone(), args.len() as u32));
+                }
             }
             Expr::List(items) => {
                 for it in items {
@@ -518,6 +683,25 @@ impl Compiler {
                 }
                 self.code
                     .push(Instr::CallMethod(name.clone(), args.len() as u32));
+            }
+            Expr::Member { target, name } => {
+                self.compile_expr(target)?;
+                self.code.push(Instr::GetField(name.clone()));
+            }
+            Expr::MemberAssign {
+                name,
+                path,
+                value,
+            } => {
+                if path.len() != 1 {
+                    return Err(Self::unsupported("gán field lồng nhiều cấp"));
+                }
+                // value; struct; SetField(field) → struct mới; gán lại biến.
+                self.compile_expr(value)?;
+                self.compile_var_load(name);
+                self.code.push(Instr::SetField(path[0].clone()));
+                self.store_var(name);
+                self.code.push(Instr::Pop);
             }
             Expr::Slice {
                 target,
@@ -971,6 +1155,87 @@ impl Vm {
         }
     }
 
+    fn struct_has_method(&self, receiver: &Value, name: &str) -> bool {
+        if let Value::Vm(crate::vm::VmObj::Struct(s)) = receiver {
+            if let Some(st) = self.program.structs.get(&s.ty_name) {
+                return st.methods.contains_key(name);
+            }
+        }
+        false
+    }
+
+    // Gọi một method của struct: bind self + fields + params rồi push frame.
+    fn call_struct_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        method_args: Vec<Value>,
+        frames: &mut Vec<Frame>,
+    ) -> Result<(), String> {
+        let (ty_name, fields) = match &receiver {
+            Value::Vm(crate::vm::VmObj::Struct(s)) => (s.ty_name.clone(), s.fields.clone()),
+            _ => return Err("call_struct_method: không phải struct".to_string()),
+        };
+        let st = self
+            .program
+            .structs
+            .get(&ty_name)
+            .ok_or_else(|| format!("thiếu định nghĩa struct '{}'", ty_name))?;
+        let m = st
+            .methods
+            .get(method)
+            .ok_or_else(|| format!("struct '{}' không có method '{}'", ty_name, method))?;
+        let fc = self
+            .program
+            .functions
+            .get(&m.func_name)
+            .cloned()
+            .ok_or_else(|| format!("thiếu bytecode của '{}'", m.func_name))?;
+        if method_args.len() != fc.arity {
+            return Err(format!(
+                "Phương thức '{}' cần {} đối số, nhận {}",
+                method,
+                fc.arity,
+                method_args.len()
+            ));
+        }
+        let mut locals = vec![Value::Nil; fc.n_slots];
+        locals[0] = receiver;
+        for (i, fname) in st.fields.iter().enumerate() {
+            locals[1 + i] = fields.get(fname).cloned().unwrap_or(Value::Nil);
+        }
+        for (i, a) in method_args.into_iter().enumerate() {
+            locals[fc.n_field_slots + i] = a;
+        }
+        frames.push(Frame {
+            code: fc.code.clone(),
+            ip: 0,
+            locals,
+        });
+        Ok(())
+    }
+
+    // Magic binop: nếu toán hạng là struct có method magic thì gọi nó.
+    // Trả Ok(Some(())) nếu đã xử lý (frame method được đẩy lên).
+    fn try_magic_binop(
+        &mut self,
+        magic: &str,
+        l: Value,
+        r: Value,
+        stack: &mut Vec<Value>,
+        frames: &mut Vec<Frame>,
+    ) -> Result<Option<bool>, String> {
+        let candidates = [(l.clone(), vec![r.clone()]), (r.clone(), vec![l])];
+        for (recv, args) in candidates {
+            if self.struct_has_method(&recv, magic) {
+                self.call_struct_method(recv, magic, args, frames)?;
+                return Ok(Some(false));
+            }
+        }
+        let _ = stack;
+        Ok(None)
+    }
+
     // Chạy một lệnh; Ok(false) = tiếp tục, Ok(true) = dừng chương trình.
     fn exec_instr(
         &mut self,
@@ -1015,6 +1280,16 @@ impl Vm {
             Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Mod => {
                 let r = stack.pop().ok_or("stack rỗng")?;
                 let l = stack.pop().ok_or("stack rỗng")?;
+                let magic = match instr {
+                    Instr::Add => "__add__",
+                    Instr::Sub => "__sub__",
+                    Instr::Mul => "__mul__",
+                    Instr::Div => "__div__",
+                    _ => "__mod__",
+                };
+                if let Some(res) = self.try_magic_binop(magic, l.clone(), r.clone(), stack, frames)? {
+                    return Ok(res);
+                }
                 let v = self.vm_binop(&instr, l, r)?;
                 stack.push(v);
             }
@@ -1043,6 +1318,9 @@ impl Vm {
             Instr::Eq => {
                 let r = stack.pop().ok_or("stack rỗng")?;
                 let l = stack.pop().ok_or("stack rỗng")?;
+                if let Some(res) = self.try_magic_binop("__eq__", l.clone(), r.clone(), stack, frames)? {
+                    return Ok(res);
+                }
                 stack.push(Value::Bool(l == r));
             }
             Instr::Ne => {
@@ -1139,6 +1417,10 @@ impl Vm {
             Instr::GetIndex => {
                 let idx = stack.pop().ok_or("stack rỗng")?;
                 let container = stack.pop().ok_or("stack rỗng")?;
+                if self.struct_has_method(&container, "__getitem__") {
+                    self.call_struct_method(container, "__getitem__", vec![idx], frames)?;
+                    return Ok(false);
+                }
                 let v = match container {
                     Value::List(items) => {
                         let i = crate::interpreter::expect_and_normalize_index(&idx, items.len())?;
@@ -1169,6 +1451,10 @@ impl Vm {
                 let idx = stack.pop().ok_or("stack rỗng")?;
                 let container = stack.pop().ok_or("stack rỗng")?;
                 let value = stack.pop().ok_or("stack rỗng")?;
+                if self.struct_has_method(&container, "__setitem__") {
+                    self.call_struct_method(container, "__setitem__", vec![idx, value], frames)?;
+                    return Ok(false);
+                }
                 let rebuilt = match container {
                     Value::List(items) => {
                         let i = crate::interpreter::expect_and_normalize_index(&idx, items.len())?;
@@ -1189,6 +1475,84 @@ impl Vm {
                     }
                 };
                 stack.push(rebuilt);
+            }
+            Instr::GetField(name) => {
+                let container = stack.pop().ok_or("stack rỗng")?;
+                let v = match container {
+                    Value::Vm(crate::vm::VmObj::Struct(s)) => s
+                        .fields
+                        .get(&name)
+                        .cloned()
+                        .ok_or_else(|| format!("struct '{}' không có field '{}'", s.ty_name, name))?,
+                    other => {
+                        return Err(format!(
+                            "giá trị '{}' không có field '{}'",
+                            stringify_value(&other),
+                            name
+                        ));
+                    }
+                };
+                stack.push(v);
+            }
+            Instr::SetField(name) => {
+                let container = stack.pop().ok_or("stack rỗng")?;
+                let value = stack.pop().ok_or("stack rỗng")?;
+                let rebuilt = match container {
+                    Value::Vm(crate::vm::VmObj::Struct(s)) => {
+                        if !s.fields.contains_key(&name) {
+                            return Err(format!(
+                                "struct '{}' không có field '{}'",
+                                s.ty_name, name
+                            ));
+                        }
+                        let mut fields = s.fields.clone();
+                        fields.insert(name.clone(), value);
+                        Value::Vm(crate::vm::VmObj::Struct(StructValVm {
+                            ty_name: s.ty_name.clone(),
+                            fields,
+                        }))
+                    }
+                    other => {
+                        return Err(format!(
+                            "gán field không áp dụng cho '{}'",
+                            stringify_value(&other)
+                        ));
+                    }
+                };
+                stack.push(rebuilt);
+            }
+            Instr::CallStruct(name, argc) => {
+                let mut args = Vec::with_capacity(argc as usize);
+                for _ in 0..argc {
+                    args.push(stack.pop().ok_or("stack rỗng")?);
+                }
+                args.reverse();
+                let st = self
+                    .program
+                    .structs
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| format!("thiếu struct '{}'", name))?;
+                if args.len() > st.fields.len() {
+                    return Err(format!(
+                        "struct '{}' có {} field, nhận {} đối số",
+                        name,
+                        st.fields.len(),
+                        args.len()
+                    ));
+                }
+                // Field chưa truyền đối số mặc định nil (phase 3 VM chưa đánh giá biểu thức mặc định).
+                let mut fields = indexmap::IndexMap::new();
+                for fname in &st.fields {
+                    fields.insert(fname.clone(), Value::Nil);
+                }
+                for (fname, v) in st.fields.iter().zip(args.into_iter()) {
+                    fields.insert(fname.clone(), v);
+                }
+                stack.push(Value::Vm(crate::vm::VmObj::Struct(StructValVm {
+                    ty_name: name,
+                    fields,
+                })));
             }
             Instr::Slice => {
                 let step_v = stack.pop().ok_or("stack rỗng")?;
@@ -1246,6 +1610,10 @@ impl Vm {
             Instr::In => {
                 let r = stack.pop().ok_or("stack rỗng")?;
                 let l = stack.pop().ok_or("stack rỗng")?;
+                if self.struct_has_method(&r, "__contains__") {
+                    self.call_struct_method(r, "__contains__", vec![l], frames)?;
+                    return Ok(false);
+                }
                 let found = match &r {
                     Value::List(items) => items.contains(&l),
                     Value::Tuple(items) => items.contains(&l),
@@ -1273,6 +1641,10 @@ impl Vm {
                 }
                 args.reverse();
                 let receiver = stack.pop().ok_or("stack rỗng")?;
+                if matches!(receiver, Value::Vm(crate::vm::VmObj::Struct(_))) {
+                    self.call_struct_method(receiver, &name, args.clone(), frames)?;
+                    return Ok(false);
+                }
                 if name == "reverse" {
                     if let Value::List(items) = &receiver {
                         let rev: Vec<Value> = items.iter().rev().cloned().collect();
@@ -1301,6 +1673,16 @@ impl Vm {
                     args.push(stack.pop().ok_or("stack rỗng")?);
                 }
                 args.reverse();
+                // len(x)/str(x) trên struct dùng magic __len__/__str__.
+                if (name == "len" || name == "str") && !args.is_empty() {
+                    let magic = if name == "len" { "__len__" } else { "__str__" };
+                    if self.struct_has_method(&args[0], magic) {
+                        let receiver = args[0].clone();
+                        let rest = args[1..].to_vec();
+                        self.call_struct_method(receiver, magic, rest, frames)?;
+                        return Ok(false);
+                    }
+                }
                 if name == "__print__" || name == "__println__" {
                     let text: String = args
                         .iter()
@@ -1472,8 +1854,8 @@ mod tests {
 
     #[test]
     fn vm_unsupported_errors_clearly() {
-        // Struct chưa hỗ trợ trong VM (phase 2) → lỗi rõ ràng (compile).
-        let stmts = Parser::new(Lexer::new("struct P { x = 0; }").tokenize().unwrap())
+        // Lambda/closure chưa hỗ trợ trong VM → lỗi rõ ràng (compile).
+        let stmts = Parser::new(Lexer::new("let f = func(x) { return x; };").tokenize().unwrap())
             .parse()
             .unwrap();
         assert!(compile(&stmts).is_err());
@@ -1546,5 +1928,57 @@ mod tests {
         let src = r#"throw "đầu hàng";"#;
         let e = vm_run(src).unwrap_err();
         assert!(e.contains("đầu hàng"), "{}", e);
+    }
+
+    #[test]
+    fn vm_struct_fields_and_methods() {
+        let src = r#"
+            struct Point { x = nil; y = nil; func mag() { return x * x + y * y; } }
+            let p = Point(3, 4);
+            let hit = 0;
+            if p.x == 3 { hit = hit + 1; }
+            if p.mag() == 25 { hit = hit + 1; }
+            p.x = 9;
+            if p.x == 9 { hit = hit + 1; }
+            if hit != 3 { println("sai"); }
+        "#;
+        assert!(vm_run(src).is_ok());
+    }
+
+    #[test]
+    fn vm_struct_magic() {
+        let src = r#"
+            struct V {
+                x = nil; y = nil;
+                func __add__(o) { return V(x + o.x, y + o.y); }
+                func __len__() { return 2; }
+                func __str__() { return "V(" + str(x) + ")"; }
+                func __eq__(o) { return x == o.x and y == o.y; }
+            }
+            let a = V(1, 2);
+            let b = a + V(3, 4);
+            let ok = 0;
+            if b.x == 4 { ok = ok + 1; }
+            if len(a) == 2 { ok = ok + 1; }
+            if ok != 2 { println("sai"); }
+        "#;
+        assert!(vm_run(src).is_ok());
+    }
+
+    #[test]
+    fn vm_with_context_manager() {
+        let src = r#"
+            let log = [];
+            struct C {
+                func __enter__() { log = append(log, "in"); return self; }
+                func __exit__(exc) { log = append(log, "exit"); return true; }
+            }
+            with C() { log = append(log, "body"); }
+            if list_join(log, ",") != "in,body,exit" { println("sai1"); }
+            let log2 = [];
+            try { with C() { let z = 1 / 0; } } catch e { log2 = append(log2, "caught"); }
+            if list_join(log2, ",") != "in,exit,caught" { println("sai2"); }
+        "#;
+        assert!(vm_run(src).is_ok());
     }
 }
